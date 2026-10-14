@@ -774,6 +774,42 @@ describe("lib/tuya", () => {
                     setpoint_after_boost: null,
                 },
             });
+
+            // Subsequent preset change when setpoint_after_boost is null does not restore 0°C
+            const metaNullSetpoint = {
+                ...metaInBoost,
+                state: {
+                    ...metaInBoost.state,
+                    preset: "boost",
+                    setpoint_after_boost: null,
+                },
+            } as Tz.Meta;
+            const changeRes = await climateTz?.convertSet?.(device.endpoints[0], "preset", "comfort", metaNullSetpoint);
+            expect(changeRes?.state?.current_heating_setpoint).toBeUndefined();
+        });
+
+        it("saves converted string values to device.meta for optional features", () => {
+            const climateFz = definition?.fromZigbee?.find((c) => c.cluster === "manuSpecificTuya");
+            const createDpMsg = (dp: number, val: number) =>
+                ({
+                    data: {
+                        dpValues: [{dp, datatype: 4, data: Buffer.from([val])}],
+                    },
+                }) as unknown as Fz.Message;
+
+            const testDevice = {
+                meta: {},
+                save: vi.fn(),
+            } as unknown as Zh.Device;
+            const meta = {state: {}, device: testDevice} as unknown as Fz.Meta;
+
+            // DP 127 regulation_mode: 0 -> "pid"
+            climateFz?.convert(definition as Definition, createDpMsg(127, 0), () => {}, {}, meta);
+            expect(testDevice.meta.regulation_mode).toBe("pid");
+
+            // DP 110 motor_thrust: 0 -> "strong"
+            climateFz?.convert(definition as Definition, createDpMsg(110, 0), () => {}, {}, meta);
+            expect(testDevice.meta.motor_thrust).toBe("strong");
         });
 
         it("handles boost start and end via DP 118 returning to schedule preset", () => {

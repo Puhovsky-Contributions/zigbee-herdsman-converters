@@ -2510,9 +2510,9 @@ export const valueConverter = {
         },
     },
     /**
-     * Value converter for Tuya TRV602Z day schedule with prepended day number (0=Mon..6=Sun).
+     * Value converter for Tuya TRV602Z day schedule with prepended day number (1=Mon..7=Sun).
      *
-     * @param dayNum - Day index (0 for Monday, 6 for Sunday)
+     * @param dayNum - Day number (1 for Monday, 7 for Sunday)
      * @returns Value converter with prepended day number
      */
     // biome-ignore lint/style/useNamingConvention: ignored using `--suppress`
@@ -5801,7 +5801,10 @@ const tuyaModernExtend = {
                         };
                         const metaKey = metaKeys[dp];
                         if (metaKey) {
-                            const val = dp === 9 || dp === 10 || dp === 115 ? (value as number) / 10 : value;
+                            const dpEntry = model.meta?.tuyaDatapoints?.find((d) => d[0] === dp);
+                            const converter = dpEntry?.[2] as {from?: (v: unknown) => unknown} | undefined;
+                            const fallbackVal = dp === 9 || dp === 10 || dp === 115 ? (value as number) / 10 : value;
+                            const val = converter?.from ? converter.from(value) : fallbackVal;
                             if (meta.device.meta[metaKey] !== val) {
                                 meta.device.meta[metaKey] = val;
                                 meta.device.save();
@@ -5861,8 +5864,8 @@ const tuyaModernExtend = {
                     await sendDataPointValue(entity, 118, 0);
                     resultState.boost_duration_set = 0;
                     resultState.boost_till = "off";
-                    if (meta.state.setpoint_after_boost !== undefined) {
-                        await sendDataPointValue(entity, 4, Math.round((meta.state.setpoint_after_boost as number) * 10));
+                    if (typeof meta.state.setpoint_after_boost === "number") {
+                        await sendDataPointValue(entity, 4, Math.round(meta.state.setpoint_after_boost * 10));
                         resultState.current_heating_setpoint = meta.state.setpoint_after_boost;
                         resultState.setpoint_after_boost = null;
                     }
@@ -5879,7 +5882,6 @@ const tuyaModernExtend = {
                         resultState.system_mode = "off";
                         resultState.device_mode = "off";
                         resultState.preset = "none";
-                        resultState.current_heating_setpoint = (meta.state.min_temperature as number | undefined) ?? 5;
                         break;
                     case "heat":
                         resultState.system_mode = "heat";
@@ -6124,7 +6126,7 @@ const tuyaModernExtend = {
                 ...tuyaExposes
                     .scheduleAllDays(
                         ea.STATE_SET,
-                        '00:00/16.0 08:30/23 12:30/comfort 14:00/eco 18:00/sleep 22:00/eco". Up to 6 transitions of format: HH:MM/<temp or mode>. Configurable modes: "sleep|eco|comfort',
+                        "00:00/16.0 08:30/23 12:30/comfort 14:00/eco 18:00/sleep 22:00/eco. Up to 6 transitions of format: HH:MM/<temp or mode>. Configurable modes: sleep|eco|comfort",
                     )
                     .map((text) => text.withCategory("config")),
                 e

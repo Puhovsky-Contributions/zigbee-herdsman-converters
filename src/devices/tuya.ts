@@ -11949,7 +11949,7 @@ export const definitions: DefinitionWithExtend[] = [
         // https://github.com/Koenkk/zigbee2mqtt/issues/30054
         extend: [
             tuya.modernExtend.tuyaTrv602z(),
-            tuyaBase({
+            tuya.modernExtend.tuyaBase({
                 dp: true,
                 timeStart: "2000",
                 forceTimeUpdates: true,
