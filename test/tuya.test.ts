@@ -678,6 +678,13 @@ describe("lib/tuya", () => {
                 boost_till: "off",
                 away_till: "off",
             });
+
+            const populatedMeta = {
+                state: {boost_duration: 30, away_duration: 10, boost_till: "2026-10-14T12:00:00Z", away_till: "off"},
+                device,
+            } as unknown as Fz.Meta;
+            const resPopulated = initConverter?.convert(definition as Definition, {} as Fz.Message, () => {}, {}, populatedMeta);
+            expect(resPopulated).toBeUndefined();
         });
 
         it("maps device_mode reports from DP 2", () => {

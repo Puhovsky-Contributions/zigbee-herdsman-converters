@@ -5625,16 +5625,16 @@ const tuyaModernExtend = {
      * @returns ModernExtend definition for TRV602Z
      */
     tuyaTrv602z: (): ModernExtend => {
-        const fzInit: Fz.Converter<"genBasic", undefined, ["attributeReport", "readResponse"]> = {
+        const fzVirtualProperties: Fz.Converter<"genBasic", undefined, ["attributeReport", "readResponse"]> = {
             cluster: "genBasic",
             type: ["attributeReport", "readResponse"],
             convert: (model, msg, publish, options, meta) => {
-                return {
-                    boost_duration: (meta.state.boost_duration as number | undefined) ?? 15,
-                    away_duration: (meta.state.away_duration as number | undefined) ?? 7,
-                    boost_till: (meta.state.boost_till as string | undefined) ?? "off",
-                    away_till: (meta.state.away_till as string | undefined) ?? "off",
-                };
+                const result: KeyValue = {};
+                if (meta.state.boost_duration === undefined) result.boost_duration = 15;
+                if (meta.state.away_duration === undefined) result.away_duration = 7;
+                if (meta.state.boost_till === undefined) result.boost_till = "off";
+                if (meta.state.away_till === undefined) result.away_till = "off";
+                return Object.keys(result).length > 0 ? result : undefined;
             },
         };
 
@@ -5804,12 +5804,12 @@ const tuyaModernExtend = {
                             10: "min_temperature",
                         };
                         const featureConverters: Record<number, (v: unknown) => unknown> = {
-                            9: (v) => (v as number) / 10,
-                            10: (v) => (v as number) / 10,
-                            110: (v) => ["strong", "middle", "weak"][v as number] ?? v,
-                            111: (v) => ["high", "medium", "low"][v as number] ?? v,
-                            113: (v) => ["up", "down", "left", "right"][v as number] ?? v,
-                            115: (v) => (v as number) / 10,
+                            9: (v) => (typeof v === "number" ? v / 10 : v),
+                            10: (v) => (typeof v === "number" ? v / 10 : v),
+                            110: (v) => (typeof v === "number" ? (["strong", "middle", "weak"][v] ?? v) : v),
+                            111: (v) => (typeof v === "number" ? (["high", "medium", "low"][v] ?? v) : v),
+                            113: (v) => (typeof v === "number" ? (["up", "down", "left", "right"][v] ?? v) : v),
+                            115: (v) => (typeof v === "number" ? v / 10 : v),
                             122: (v) => (v === 1 ? "ON" : "OFF"),
                             127: (v) => (v === 0 ? "pid" : v === 1 ? "hysteresis" : v),
                         };
@@ -6223,7 +6223,7 @@ const tuyaModernExtend = {
         };
 
         return {
-            fromZigbee: [fzInit, fzClimate],
+            fromZigbee: [fzVirtualProperties, fzClimate],
             toZigbee: [tzClimate, tzDurations],
             exposes: [exposesFunction],
             options: [
