@@ -1545,117 +1545,6 @@ export const valueConverterBasic = {
     },
 };
 
-const TRV602Z_CONFIG_BIT_TEMPORARY = 0;
-const TRV602Z_CONFIG_BIT_WINDOW = 1;
-const TRV602Z_CONFIG_BIT_OLED_SCREEN = 4;
-const TRV602Z_CONFIG_BIT_MOTOR_THRUST = 10;
-
-interface Trv602zScheduleTransition {
-    minutesSinceMidnight: number;
-    setting: string;
-}
-
-interface Trv602zScheduleMode {
-    code: number;
-    offset: number;
-    mode: "sleep" | "eco" | "comfort" | "manual";
-    defaultTemp?: number;
-}
-
-const TRV602Z_SCHEDULE_MODES: readonly Trv602zScheduleMode[] = [
-    {code: 0x10, offset: 0xc0, mode: "sleep", defaultTemp: 0},
-    {code: 0x20, offset: 0xc0, mode: "eco", defaultTemp: 150},
-    {code: 0x30, offset: 0xc0, mode: "comfort", defaultTemp: 200},
-    {code: 0x40, offset: 0xa0, mode: "manual", defaultTemp: undefined},
-] as const;
-
-/**
- * Parses a single schedule transition string in HH:MM/<temp or mode> format.
- *
- * @param transition - Transition string, e.g. "08:30/21.5" or "12:00/comfort"
- * @returns Parsed transition with minutes since midnight and setting string
- */
-function parseScheduleTransitionTRV602Z(transition: string): Trv602zScheduleTransition {
-    const parts = transition.split("/");
-    if (parts.length !== 2) {
-        throw new Error(`Invalid schedule: wrong transition format "${transition}"`);
-    }
-    const [timePart, setting] = parts;
-    const timeParts = timePart.split(":");
-    if (timeParts.length !== 2) {
-        throw new Error(`Invalid time format in: "${transition}"`);
-    }
-    const hour = Number.parseInt(timeParts[0], 10);
-    const min = Number.parseInt(timeParts[1], 10);
-    if (Number.isNaN(hour) || Number.isNaN(min) || hour < 0 || hour > 23 || min < 0 || min > 59) {
-        throw new Error(`Invalid hour or minute in: "${transition}"`);
-    }
-    return {minutesSinceMidnight: hour * 60 + min, setting};
-}
-
-/**
- * Determines the currently active scheduled target temperature for the TRV602Z based on day and time.
- *
- * @param meta - Converter meta containing current state and day schedules
- * @returns Active target temperature in °C, or null if schedule is unconfigured/indeterminate
- */
-function getActiveScheduleTemperatureTRV602Z(meta: Fz.Meta | Tz.Meta): number | null {
-    try {
-        const now = new Date();
-        const dayOfWeek = now.getDay();
-        const tuyaDay = dayOfWeek === 0 ? 7 : dayOfWeek;
-
-        const dayToDpName: Record<number, string> = {
-            1: "schedule_monday",
-            2: "schedule_tuesday",
-            3: "schedule_wednesday",
-            4: "schedule_thursday",
-            5: "schedule_friday",
-            6: "schedule_saturday",
-            7: "schedule_sunday",
-        };
-        const scheduleDpName = dayToDpName[tuyaDay];
-        const scheduleString = meta.state[scheduleDpName];
-
-        if (!scheduleString || typeof scheduleString !== "string") return null;
-
-        const transitions = scheduleString
-            .split(/\s+/)
-            .filter(Boolean)
-            .map((t) => {
-                try {
-                    return parseScheduleTransitionTRV602Z(t);
-                } catch {
-                    return null;
-                }
-            })
-            .filter((t): t is Trv602zScheduleTransition => t !== null)
-            .sort((a, b) => a.minutesSinceMidnight - b.minutesSinceMidnight);
-
-        if (transitions.length === 0) return null;
-
-        // Offset by +1 minute so the scheduled slot is considered active immediately at the exact start minute (e.g. at 08:30:00).
-        const currentMinutes = now.getHours() * 60 + now.getMinutes() + 1;
-        let activeTransition = transitions[transitions.length - 1];
-        for (let i = transitions.length - 1; i >= 0; i--) {
-            if (currentMinutes >= transitions[i].minutesSinceMidnight) {
-                activeTransition = transitions[i];
-                break;
-            }
-        }
-
-        const setting = activeTransition.setting;
-        if (setting === "comfort") return (meta.state.comfort_temperature as number | undefined) ?? null;
-        if (setting === "eco") return (meta.state.eco_temperature as number | undefined) ?? null;
-        if (setting === "sleep") return (meta.state.sleep_temperature as number | undefined) ?? null;
-
-        const temp = Number.parseFloat(setting);
-        return Number.isNaN(temp) ? null : temp;
-    } catch {
-        return null;
-    }
-}
-
 export const valueConverter = {
     trueFalse0: valueConverterBasic.trueFalse(0),
     trueFalse1: valueConverterBasic.trueFalse(1),
@@ -4597,6 +4486,43 @@ const tuyaFirmwareId = async (device: Zh.Device) => {
     device.meta.hasCustomFirmwareId = true;
 };
 
+interface Trv602zScheduleTransition {
+    minutesSinceMidnight: number;
+    setting: string;
+}
+
+interface Trv602zScheduleMode {
+    code: number;
+    offset: number;
+    mode: "sleep" | "eco" | "comfort" | "manual";
+    defaultTemp?: number;
+}
+
+const TRV602Z_SCHEDULE_MODES: readonly Trv602zScheduleMode[] = [
+    {code: 0x10, offset: 0xc0, mode: "sleep", defaultTemp: 0},
+    {code: 0x20, offset: 0xc0, mode: "eco", defaultTemp: 150},
+    {code: 0x30, offset: 0xc0, mode: "comfort", defaultTemp: 200},
+    {code: 0x40, offset: 0xa0, mode: "manual", defaultTemp: undefined},
+] as const;
+
+function parseScheduleTransitionTRV602Z(transition: string): Trv602zScheduleTransition {
+    const parts = transition.split("/");
+    if (parts.length !== 2) {
+        throw new Error(`Invalid schedule: wrong transition format "${transition}"`);
+    }
+    const [timePart, setting] = parts;
+    const timeParts = timePart.split(":");
+    if (timeParts.length !== 2) {
+        throw new Error(`Invalid time format in: "${transition}"`);
+    }
+    const hour = Number.parseInt(timeParts[0], 10);
+    const min = Number.parseInt(timeParts[1], 10);
+    if (Number.isNaN(hour) || Number.isNaN(min) || hour < 0 || hour > 23 || min < 0 || min > 59) {
+        throw new Error(`Invalid hour or minute in: "${transition}"`);
+    }
+    return {minutesSinceMidnight: hour * 60 + min, setting};
+}
+
 const tuyaModernExtend = {
     electricityMeasurementPoll(
         args: {
@@ -5625,6 +5551,68 @@ const tuyaModernExtend = {
      * @returns ModernExtend definition for TRV602Z
      */
     tuyaTrv602z: (): ModernExtend => {
+        const TRV602Z_CONFIG_BIT_TEMPORARY = 0;
+        const TRV602Z_CONFIG_BIT_WINDOW = 1;
+        const TRV602Z_CONFIG_BIT_OLED_SCREEN = 4;
+        const TRV602Z_CONFIG_BIT_MOTOR_THRUST = 10;
+
+        function getActiveScheduleTemperatureTRV602Z(meta: Fz.Meta | Tz.Meta): number | null {
+            try {
+                const now = new Date();
+                const dayOfWeek = now.getDay();
+                const tuyaDay = dayOfWeek === 0 ? 7 : dayOfWeek;
+
+                const dayToDpName: Record<number, string> = {
+                    1: "schedule_monday",
+                    2: "schedule_tuesday",
+                    3: "schedule_wednesday",
+                    4: "schedule_thursday",
+                    5: "schedule_friday",
+                    6: "schedule_saturday",
+                    7: "schedule_sunday",
+                };
+                const scheduleDpName = dayToDpName[tuyaDay];
+                const scheduleString = meta.state[scheduleDpName];
+
+                if (!scheduleString || typeof scheduleString !== "string") return null;
+
+                const transitions = scheduleString
+                    .split(/\s+/)
+                    .filter(Boolean)
+                    .map((t) => {
+                        try {
+                            return parseScheduleTransitionTRV602Z(t);
+                        } catch {
+                            return null;
+                        }
+                    })
+                    .filter((t): t is Trv602zScheduleTransition => t !== null)
+                    .sort((a, b) => a.minutesSinceMidnight - b.minutesSinceMidnight);
+
+                if (transitions.length === 0) return null;
+
+                // Offset by +1 minute so the scheduled slot is considered active immediately at the exact start minute (e.g. at 08:30:00).
+                const currentMinutes = now.getHours() * 60 + now.getMinutes() + 1;
+                let activeTransition = transitions[transitions.length - 1];
+                for (let i = transitions.length - 1; i >= 0; i--) {
+                    if (currentMinutes >= transitions[i].minutesSinceMidnight) {
+                        activeTransition = transitions[i];
+                        break;
+                    }
+                }
+
+                const setting = activeTransition.setting;
+                if (setting === "comfort") return (meta.state.comfort_temperature as number | undefined) ?? null;
+                if (setting === "eco") return (meta.state.eco_temperature as number | undefined) ?? null;
+                if (setting === "sleep") return (meta.state.sleep_temperature as number | undefined) ?? null;
+
+                const temp = Number.parseFloat(setting);
+                return Number.isNaN(temp) ? null : temp;
+            } catch {
+                return null;
+            }
+        }
+
         const fzInitialVirtualState: Fz.Converter<"genBasic", undefined, ["attributeReport", "readResponse"]> = {
             cluster: "genBasic",
             type: ["attributeReport", "readResponse"],
