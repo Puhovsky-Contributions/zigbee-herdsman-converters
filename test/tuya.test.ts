@@ -613,11 +613,20 @@ describe("lib/tuya", () => {
             expect(decoded).toBe(input);
         });
 
+        it("sorts transitions chronologically and supports up to 35.0°C", () => {
+            const unsorted = "18:00/comfort 06:00/eco 22:00/35.0";
+            const encoded = converter.to(unsorted);
+            expect(encoded.length).toBe(24);
+            const decoded = converter.from([1, ...encoded]);
+            expect(decoded).toBe("06:00/eco 18:00/comfort 22:00/35.0");
+        });
+
         it("throws on invalid schedule input", () => {
             expect(() => converter.to("")).toThrow("Invalid schedule");
             expect(() => converter.to("25:00/comfort")).toThrow("Invalid hour or minute");
             expect(() => converter.to("06:00/invalid_mode")).toThrow("Invalid schedule setting");
             expect(() => converter.to("06:00/4.0")).toThrow("Invalid temperature");
+            expect(() => converter.to("06:00/35.5")).toThrow("Invalid temperature");
         });
     });
 
@@ -688,6 +697,8 @@ describe("lib/tuya", () => {
             expect(climateFz?.convert(definition as Definition, createMsg(0), () => {}, {}, meta)).toStrictEqual({
                 device_mode: "off",
                 system_mode: "off",
+                preset: "none",
+                current_heating_setpoint: 5,
             });
 
             // Mode 3: comfort
@@ -706,7 +717,7 @@ describe("lib/tuya", () => {
             });
         });
 
-        it("handles boost start and end via DP 118", () => {
+        it("handles boost start and end via DP 118 with state preservation and restoration", () => {
             const climateFz = definition?.fromZigbee?.find((c) => c.cluster === "manuSpecificTuya");
             const createMsg = (mins: number) =>
                 ({
@@ -715,7 +726,7 @@ describe("lib/tuya", () => {
                     },
                 }) as unknown as Fz.Message;
 
-            const meta = {state: {preset: "schedule"}, device} as unknown as Fz.Meta;
+            const meta = {state: {preset: "eco", current_heating_setpoint: 19.5}, device} as unknown as Fz.Meta;
 
             // Start boost 15 min
             const startRes = climateFz?.convert(definition as Definition, createMsg(15), () => {}, {}, meta);
@@ -723,15 +734,70 @@ describe("lib/tuya", () => {
                 preset: "boost",
                 boost_duration_set: 15,
                 boost_till: expect.any(String),
+                setpoint_after_boost: 19.5,
+                preset_before_boost: "eco",
             });
 
-            // End boost
-            const metaInBoost = {state: {preset: "boost"}, device} as unknown as Fz.Meta;
+            // End boost restores previous preset and setpoint
+            const metaInBoost = {
+                state: {preset: "boost", setpoint_after_boost: 19.5, preset_before_boost: "eco"},
+                device,
+            } as unknown as Fz.Meta;
             const endRes = climateFz?.convert(definition as Definition, createMsg(0), () => {}, {}, metaInBoost);
             expect(endRes).toMatchObject({
-                preset: "schedule",
+                preset: "eco",
+                current_heating_setpoint: 19.5,
                 boost_duration_set: 0,
                 boost_till: "off",
+            });
+        });
+
+        it("clamps setpoint within min and max in tz climate converter", async () => {
+            const climateTz = definition?.toZigbee?.find((c) => c.key?.includes("current_heating_setpoint"));
+            expect(climateTz).toBeDefined();
+
+            const meta = {
+                state: {min_temperature: 7, max_temperature: 28, system_mode: "heat", preset: "manual"},
+                device,
+                endpoint_name: null,
+                options: null,
+                message: null,
+                mapped: definition,
+                publish: null,
+            } as Tz.Meta;
+
+            // Below min
+            const resLow = await climateTz?.convertSet?.(device.endpoints[0], "current_heating_setpoint", 4, meta);
+            expect(resLow).toStrictEqual({state: {current_heating_setpoint: 7}});
+
+            // Above max
+            const resHigh = await climateTz?.convertSet?.(device.endpoints[0], "current_heating_setpoint", 32, meta);
+            expect(resHigh).toStrictEqual({state: {current_heating_setpoint: 28}});
+
+            // Normal within bounds
+            const resNormal = await climateTz?.convertSet?.(device.endpoints[0], "current_heating_setpoint", 21.5, meta);
+            expect(resNormal).toStrictEqual({state: {current_heating_setpoint: 21.5}});
+        });
+
+        it("syncs preset when DP 119/120/121 received matching setpoint in non-auto mode", () => {
+            const climateFz = definition?.fromZigbee?.find((c) => c.cluster === "manuSpecificTuya");
+            const createDpMsg = (dp: number, tempTenths: number) =>
+                ({
+                    data: {
+                        dpValues: [{dp, datatype: 2, data: Buffer.from([0, 0, 0, tempTenths])}],
+                    },
+                }) as unknown as Fz.Message;
+
+            const meta = {
+                state: {system_mode: "heat", current_heating_setpoint: 21.0, preset: "manual"},
+                device,
+            } as unknown as Fz.Meta;
+
+            // DP 119 comfort_temperature = 21.0 matches setpoint
+            const resComfort = climateFz?.convert(definition as Definition, createDpMsg(119, 210), () => {}, {}, meta);
+            expect(resComfort).toMatchObject({
+                comfort_temperature: 21.0,
+                preset: "comfort",
             });
         });
 
@@ -751,12 +817,12 @@ describe("lib/tuya", () => {
             );
         });
 
-        it("generates dynamic exposes based on device metadata", () => {
+        it("generates dynamic exposes based on device metadata and options", () => {
             const exposesFn = definition?.exposes as (device: Zh.Device | undefined, options: unknown) => Expose[];
             expect(typeof exposesFn).toBe("function");
 
             // Documentation generation mode (!device)
-            const docExposes = exposesFn(undefined, {});
+            const docExposes = exposesFn(undefined, {calibration_range: 5.0});
             const docNames = docExposes.map((e) => e.name);
             expect(docNames).toContain("window_detection");
             expect(docNames).toContain("window_open");
@@ -781,7 +847,7 @@ describe("lib/tuya", () => {
                     max_temperature: 30,
                 },
             } as unknown as Zh.Device;
-            const configExposes = exposesFn(configuredDevice, {});
+            const configExposes = exposesFn(configuredDevice, {calibration_range: 3.0});
             const configNames = configExposes.map((e) => e.name);
             expect(configNames).toContain("window_detection");
             expect(configNames).toContain("window_open");
