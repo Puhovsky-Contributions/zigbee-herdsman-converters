@@ -5810,7 +5810,7 @@ const tuyaModernExtend = {
                             111: (v) => (typeof v === "number" ? (["high", "medium", "low"][v] ?? v) : v),
                             113: (v) => (typeof v === "number" ? (["up", "down", "left", "right"][v] ?? v) : v),
                             115: (v) => (typeof v === "number" ? v / 10 : v),
-                            122: (v) => (v === 1 ? "ON" : "OFF"),
+                            122: (v) => (v === 1 || v === true ? "ON" : "OFF"),
                             127: (v) => (v === 0 ? "pid" : v === 1 ? "hysteresis" : v),
                         };
                         const metaKey = metaKeys[dp];

@@ -872,6 +872,18 @@ describe("lib/tuya", () => {
             // DP 110 motor_thrust: 0 -> "strong"
             climateFz?.convert(definition as Definition, createDpMsg(110, 0), () => {}, {}, meta);
             expect(testDevice.meta.motor_thrust).toBe("strong");
+
+            // DP 122 frost_protection: boolean true -> "ON"
+            const createBoolDpMsg = (dp: number, val: boolean) =>
+                ({
+                    data: {
+                        dpValues: [{dp, datatype: 1, data: Buffer.from([val ? 1 : 0])}],
+                    },
+                }) as unknown as Fz.Message;
+            climateFz?.convert(definition as Definition, createBoolDpMsg(122, true), () => {}, {}, meta);
+            expect(testDevice.meta.frost_protection).toBe("ON");
+            climateFz?.convert(definition as Definition, createBoolDpMsg(122, false), () => {}, {}, meta);
+            expect(testDevice.meta.frost_protection).toBe("OFF");
         });
 
         it("handles boost start and end via DP 118 returning to schedule preset", () => {
