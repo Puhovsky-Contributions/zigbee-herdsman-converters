@@ -717,7 +717,7 @@ describe("lib/tuya", () => {
             });
         });
 
-        it("handles boost start and end via DP 118 with state preservation and restoration", () => {
+        it("handles boost start and end via DP 118 returning to schedule preset", () => {
             const climateFz = definition?.fromZigbee?.find((c) => c.cluster === "manuSpecificTuya");
             const createMsg = (mins: number) =>
                 ({
@@ -734,19 +734,16 @@ describe("lib/tuya", () => {
                 preset: "boost",
                 boost_duration_set: 15,
                 boost_till: expect.any(String),
-                setpoint_after_boost: 19.5,
-                preset_before_boost: "eco",
             });
 
-            // End boost restores previous preset and setpoint
+            // End boost returns to schedule preset
             const metaInBoost = {
-                state: {preset: "boost", setpoint_after_boost: 19.5, preset_before_boost: "eco"},
+                state: {preset: "boost"},
                 device,
             } as unknown as Fz.Meta;
             const endRes = climateFz?.convert(definition as Definition, createMsg(0), () => {}, {}, metaInBoost);
             expect(endRes).toMatchObject({
-                preset: "eco",
-                current_heating_setpoint: 19.5,
+                preset: "schedule",
                 boost_duration_set: 0,
                 boost_till: "off",
             });

@@ -1555,6 +1555,12 @@ interface Trv602zScheduleTransition {
     setting: string;
 }
 
+/**
+ * Parses a single schedule transition string in HH:MM/<temp or mode> format.
+ *
+ * @param transition - Transition string, e.g. "08:30/21.5" or "12:00/comfort"
+ * @returns Parsed transition with minutes since midnight and setting string
+ */
 function parseScheduleTransitionTRV602Z(transition: string): Trv602zScheduleTransition {
     const parts = transition.split("/");
     if (parts.length !== 2) {
@@ -1573,6 +1579,12 @@ function parseScheduleTransitionTRV602Z(transition: string): Trv602zScheduleTran
     return {minutesSinceMidnight: hour * 60 + min, setting};
 }
 
+/**
+ * Determines the currently active scheduled target temperature for the TRV602Z based on day and time.
+ *
+ * @param meta - Converter meta containing current state and day schedules
+ * @returns Active target temperature in °C, or null if schedule is unconfigured/indeterminate
+ */
 function getActiveScheduleTemperatureTRV602Z(meta: Fz.Meta | Tz.Meta): number | null {
     try {
         const now = new Date();
@@ -1698,6 +1710,9 @@ export const valueConverter = {
         from: (value: number) => (value > 200 ? value - 256 : value),
         to: (value: number) => (value < 0 ? 256 + value : value),
     },
+    /**
+     * Converts signed 32-bit local temperature calibration in tenths of °C to/from unsigned 32-bit Tuya values.
+     */
     localTemperatureCalibration32: {
         from: (value: number) => (value > 0x7fffffff ? value - 0x100000000 : value) / 10,
         to: (value: number) => {
@@ -5588,6 +5603,13 @@ const tuyaModernExtend = {
 
         return result;
     },
+    /**
+     * Modern extend for Tuya TRV602Z / TRV801Z thermostatic radiator valves.
+     * Implements climate control, mode state machine, dynamic exposes based on TRV configuration,
+     * multi-mode schedule transitions, boost, and away presets.
+     *
+     * @returns ModernExtend definition for TRV602Z
+     */
     tuyaTrv602z: (): ModernExtend => {
         const fzInit: Fz.Converter<"genBasic", undefined, ["attributeReport", "readResponse"]> = {
             cluster: "genBasic",
@@ -5634,10 +5656,14 @@ const tuyaModernExtend = {
                             result.device_mode = entry.mode;
                             result.system_mode = entry.systemMode;
                             result.preset = entry.preset;
-                            if (entry.tempKey && meta.state[entry.tempKey] !== undefined) {
-                                result.current_heating_setpoint = meta.state[entry.tempKey];
+                            const configuredTemp = entry.tempKey
+                                ? ((result[entry.tempKey] as number | undefined) ?? (meta.state[entry.tempKey] as number | undefined))
+                                : undefined;
+                            if (configuredTemp !== undefined) {
+                                result.current_heating_setpoint = configuredTemp;
                             } else if (value === 0) {
-                                result.current_heating_setpoint = (meta.state.min_temperature as number | undefined) ?? 5;
+                                result.current_heating_setpoint =
+                                    (result.min_temperature as number | undefined) ?? (meta.state.min_temperature as number | undefined) ?? 5;
                             } else if (value === 4) {
                                 const schedTemp = getActiveScheduleTemperatureTRV602Z(meta);
                                 if (schedTemp !== null) result.current_heating_setpoint = schedTemp;
@@ -5647,11 +5673,15 @@ const tuyaModernExtend = {
                         const setpoint = (value as number) / 10;
                         result.current_heating_setpoint = setpoint;
 
-                        const preset = meta.state.preset;
-                        const sleepTemp = meta.state.sleep_temperature as number | undefined;
-                        const ecoTemp = meta.state.eco_temperature as number | undefined;
-                        const comfortTemp = meta.state.comfort_temperature as number | undefined;
-                        const trvConfig = (meta.state.trv_config as number | undefined) ?? (meta.device.meta.trv_config as number | undefined);
+                        const preset = (result.preset as string | undefined) ?? (meta.state.preset as string | undefined);
+                        const sleepTemp = (result.sleep_temperature as number | undefined) ?? (meta.state.sleep_temperature as number | undefined);
+                        const ecoTemp = (result.eco_temperature as number | undefined) ?? (meta.state.eco_temperature as number | undefined);
+                        const comfortTemp =
+                            (result.comfort_temperature as number | undefined) ?? (meta.state.comfort_temperature as number | undefined);
+                        const trvConfig =
+                            (result.trv_config as number | undefined) ??
+                            (meta.state.trv_config as number | undefined) ??
+                            (meta.device.meta.trv_config as number | undefined);
 
                         if (preset === "sleep" || preset === "eco" || preset === "comfort") {
                             const target = preset === "sleep" ? sleepTemp : preset === "eco" ? ecoTemp : comfortTemp;
@@ -5679,25 +5709,15 @@ const tuyaModernExtend = {
                         if (minutes > 0) {
                             const till = new Date();
                             till.setMinutes(till.getMinutes() + minutes);
-                            if (meta.state.preset !== "boost") {
-                                result.setpoint_after_boost = meta.state.current_heating_setpoint;
-                                result.preset_before_boost = meta.state.preset;
-                            }
                             result.preset = "boost";
                             result.boost_duration_set = minutes;
                             result.boost_till = till.toISOString();
                         } else {
-                            if (meta.state.preset === "boost") {
-                                const restorePreset = (meta.state.preset_before_boost as string | undefined) ?? "schedule";
-                                result.preset = restorePreset;
-                                if (meta.state.setpoint_after_boost !== undefined) {
-                                    result.current_heating_setpoint = meta.state.setpoint_after_boost;
-                                } else {
-                                    const schedTemp = getActiveScheduleTemperatureTRV602Z(meta);
-                                    if (schedTemp !== null) result.current_heating_setpoint = schedTemp;
-                                }
-                                result.setpoint_after_boost = undefined;
-                                result.preset_before_boost = undefined;
+                            const currentPreset = (result.preset as string | undefined) ?? (meta.state.preset as string | undefined);
+                            if (currentPreset === "boost") {
+                                result.preset = "schedule";
+                                const schedTemp = getActiveScheduleTemperatureTRV602Z(meta);
+                                if (schedTemp !== null) result.current_heating_setpoint = schedTemp;
                             }
                             result.boost_duration_set = 0;
                             result.boost_till = "off";
@@ -5711,10 +5731,12 @@ const tuyaModernExtend = {
                             result.away_duration_set = days;
                             result.away_till = till.toISOString();
                         } else {
-                            if (meta.state.preset === "away") {
+                            const currentPreset = (result.preset as string | undefined) ?? (meta.state.preset as string | undefined);
+                            if (currentPreset === "away") {
                                 result.preset = "eco";
-                                if (meta.state.eco_temperature !== undefined) {
-                                    result.current_heating_setpoint = meta.state.eco_temperature;
+                                const ecoTemp = (result.eco_temperature as number | undefined) ?? (meta.state.eco_temperature as number | undefined);
+                                if (ecoTemp !== undefined) {
+                                    result.current_heating_setpoint = ecoTemp;
                                 }
                             }
                             result.away_duration_set = 0;
@@ -5729,10 +5751,11 @@ const tuyaModernExtend = {
                         };
                         const entry = dpMap[dp];
                         result[entry.key] = temp;
-                        if (meta.state.system_mode !== "auto") {
+                        const systemMode = (result.system_mode as string | undefined) ?? (meta.state.system_mode as string | undefined);
+                        if (systemMode !== "auto") {
                             const currentSetpoint =
-                                (meta.state.current_heating_setpoint as number | undefined) ??
-                                (result.current_heating_setpoint as number | undefined);
+                                (result.current_heating_setpoint as number | undefined) ??
+                                (meta.state.current_heating_setpoint as number | undefined);
                             if (currentSetpoint !== undefined && Math.abs(currentSetpoint - temp) < 0.1) {
                                 result.preset = entry.preset;
                             }
@@ -5788,42 +5811,7 @@ const tuyaModernExtend = {
                     const maxTemp = (meta.state.max_temperature as number | undefined) ?? 35;
                     const clamped = Math.min(Math.max(value, minTemp), maxTemp);
                     await sendDataPointValue(entity, 4, Math.round(clamped * 10));
-                    const resultState: KeyValue = {current_heating_setpoint: clamped};
-
-                    const trvConfig = (meta.state.trv_config as number | undefined) ?? (meta.device.meta.trv_config as number | undefined);
-                    const preset = meta.state.preset;
-                    const currentMode = meta.state.system_mode;
-
-                    if (currentMode === "auto" || preset === "schedule" || preset === "temporary") {
-                        const scheduledTemp = getActiveScheduleTemperatureTRV602Z(meta);
-                        if (scheduledTemp !== null && Math.abs(clamped - scheduledTemp) < 0.1) {
-                            resultState.preset = "schedule";
-                        } else if (trvConfig !== undefined && ((trvConfig >> TRV602Z_CONFIG_BIT_TEMPORARY) & 1) === 1) {
-                            resultState.preset = "temporary";
-                        }
-                    } else if (preset === "sleep" || preset === "eco" || preset === "comfort") {
-                        const target =
-                            preset === "sleep"
-                                ? meta.state.sleep_temperature
-                                : preset === "eco"
-                                  ? meta.state.eco_temperature
-                                  : meta.state.comfort_temperature;
-                        if (target !== undefined && Math.abs(clamped - (target as number)) >= 0.1) {
-                            resultState.preset = "manual";
-                        }
-                    } else if (preset === "manual") {
-                        const comfortTemp = meta.state.comfort_temperature as number | undefined;
-                        const ecoTemp = meta.state.eco_temperature as number | undefined;
-                        const sleepTemp = meta.state.sleep_temperature as number | undefined;
-                        if (comfortTemp !== undefined && Math.abs(clamped - comfortTemp) < 0.1) {
-                            resultState.preset = "comfort";
-                        } else if (ecoTemp !== undefined && Math.abs(clamped - ecoTemp) < 0.1) {
-                            resultState.preset = "eco";
-                        } else if (sleepTemp !== undefined && Math.abs(clamped - sleepTemp) < 0.1) {
-                            resultState.preset = "sleep";
-                        }
-                    }
-                    return {state: resultState};
+                    return {state: {current_heating_setpoint: clamped}};
                 }
 
                 let targetSystemMode = key === "system_mode" ? (value as string) : (meta.state.system_mode as string);
@@ -5856,15 +5844,6 @@ const tuyaModernExtend = {
                     await sendDataPointValue(entity, 118, 0);
                     resultState.boost_duration_set = 0;
                     resultState.boost_till = "off";
-                    if (meta.state.setpoint_after_boost !== undefined) {
-                        await sendDataPointValue(entity, 4, Math.round((meta.state.setpoint_after_boost as number) * 10));
-                        resultState.current_heating_setpoint = meta.state.setpoint_after_boost;
-                        resultState.setpoint_after_boost = undefined;
-                    }
-                    if (meta.state.preset_before_boost !== undefined) {
-                        resultState.preset = meta.state.preset_before_boost;
-                        resultState.preset_before_boost = undefined;
-                    }
                 }
                 if (targetPreset !== "away" && currentAwayDurationSet > 0) {
                     await sendDataPointValue(entity, 117, 0);
@@ -5938,8 +5917,6 @@ const tuyaModernExtend = {
                                 }
                                 const boostDuration = (meta.state.boost_duration as number | undefined) ?? 15;
                                 if (currentBoostDurationSet === 0) {
-                                    resultState.setpoint_after_boost = meta.state.current_heating_setpoint;
-                                    resultState.preset_before_boost = meta.state.preset;
                                     await sendDataPointValue(entity, 118, boostDuration);
                                 }
                                 resultState.preset = "boost";
@@ -5979,7 +5956,7 @@ const tuyaModernExtend = {
 
             let minTemperature = 5;
             let maxTemperature = 35;
-            const calibrationRange = typeof options?.calibration_range === "number" ? options.calibration_range : 9.9;
+            const calibrationRange = typeof options?.calibration_range === "number" ? options.calibration_range : 10;
 
             if (device && !utils.isDummyDevice(device) && device.meta) {
                 if (device.meta.min_temperature !== undefined) minTemperature = device.meta.min_temperature as number;
@@ -6212,9 +6189,9 @@ const tuyaModernExtend = {
                 e
                     .numeric("calibration_range", ea.SET)
                     .withValueMin(0.1)
-                    .withValueMax(9.9)
+                    .withValueMax(10)
                     .withValueStep(0.1)
-                    .withDescription("Temperature calibration range (from -X to +X °C). Default: 9.9"),
+                    .withDescription("Temperature calibration range (from -X to +X °C). Default: 10"),
             ],
             isModernExtend: true,
         };
