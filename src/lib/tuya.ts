@@ -10,6 +10,7 @@ import * as modernExtend from "./modernExtend";
 import * as globalStore from "./store";
 import type {
     DefinitionExposesFunction,
+    DummyDevice,
     Expose,
     Fz,
     KeyValue,
@@ -1613,6 +1614,19 @@ export const valueConverter = {
         from: (value: number) => (value > 200 ? value - 256 : value),
         to: (value: number) => (value < 0 ? 256 + value : value),
     },
+    /**
+     * Converts signed 32-bit local temperature calibration in tenths of °C to/from unsigned 32-bit Tuya values.
+     */
+    localTemperatureCalibration32: {
+        from: (value: number) => (value > 0x7fffffff ? value - 0x100000000 : value) / 10,
+        to: (value: number) => {
+            if (typeof value !== "number" || !Number.isFinite(value)) {
+                throw new Error(`Invalid local_temperature_calibration value: ${value}`);
+            }
+            const val = Math.round(value * 10);
+            return val < 0 ? val + 0x100000000 : val;
+        },
+    },
     refresh: {
         to: (v: string) => {
             return v === "refresh";
@@ -2297,58 +2311,103 @@ export const valueConverter = {
             },
         };
     },
+    /**
+     * Value converter for Tuya TRV602Z weekly schedule day datapoints.
+     * Encodes and decodes 1 to 6 daily schedule transitions with configurable modes (sleep, eco, comfort, manual)
+     * and temperatures in 0.1°C steps.
+     */
     // biome-ignore lint/style/useNamingConvention: ignored using `--suppress`
     thermostatScheduleDayMultiDP_TRV602Z: {
-        from: (v: string) => {
-            const schedule = [];
-            for (let index = 1; index < 24; index = index + 4) {
-                const firstByte = (Number.parseInt(v[index + 0], 10) - 192) << 8;
-                const secondByte = Number.parseInt(v[index + 1], 10);
+        from: (v: number[] | Buffer) => {
+            const modeByCode = new Map<number, (typeof TRV602Z_SCHEDULE_MODES)[number]>(TRV602Z_SCHEDULE_MODES.map((m) => [m.code, m]));
 
-                const minutesSinceMidnight = firstByte | secondByte;
-
+            const daySchedule: string[] = [];
+            for (let index = 1; index < 24; index += 4) {
+                const firstByte = Number(v[index]);
+                const secondByte = Number(v[index + 1]);
+                const thirdByte = Number(v[index + 2]);
+                const temperature = (Number(v[index + 3]) / 10.0).toFixed(1);
+                const mode = modeByCode.get(thirdByte);
+                if (mode === undefined) {
+                    throw new Error(`Invalid mode byte: "${thirdByte}"`);
+                }
+                const minutesSinceMidnight = ((firstByte - mode.offset) << 8) | secondByte;
                 const hour = Math.floor(minutesSinceMidnight / 60);
                 const minutes = minutesSinceMidnight % 60;
-
-                schedule.push(
-                    `${String(hour).padStart(2, "0")}:${String(minutes).padStart(2, "0")}/${(Number.parseFloat(v[index + 3]) / 10.0).toFixed(1)}`,
-                );
+                const schedule = `${String(hour).padStart(2, "0")}:${String(minutes).padStart(2, "0")}/${mode.mode === "manual" ? temperature : mode.mode}`;
+                daySchedule.push(schedule);
             }
-            return schedule.join(" ");
+            return Array.from(new Set(daySchedule)).join(" ");
         },
         to: (v: string) => {
-            const payload = [];
-            const transitions = v.split(" ");
-            if (transitions.length !== 6) {
-                throw new Error("Invalid schedule: there should be 6 transitions");
+            const modeByMode = new Map<string, (typeof TRV602Z_SCHEDULE_MODES)[number]>(TRV602Z_SCHEDULE_MODES.map((m) => [m.mode, m]));
+
+            const inputTransitions = v.split(/\s+/).filter(Boolean);
+            if (inputTransitions.length < 1 || inputTransitions.length > 6) {
+                throw new Error("Invalid schedule: there should be between 1 and 6 transitions");
             }
+
+            const transitions: Trv602zScheduleTransition[] = [];
+            const seenTimes = new Set<number>();
+            for (const inputTransition of inputTransitions) {
+                const transition = parseScheduleTransitionTRV602Z(inputTransition);
+                if (!seenTimes.has(transition.minutesSinceMidnight)) {
+                    seenTimes.add(transition.minutesSinceMidnight);
+                    transitions.push(transition);
+                }
+            }
+            if (transitions.length === 0) {
+                throw new Error("No valid transitions found");
+            }
+            transitions.sort((a, b) => a.minutesSinceMidnight - b.minutesSinceMidnight);
+            while (transitions.length < 6) {
+                transitions.push(transitions[transitions.length - 1]);
+            }
+
+            const payload: number[] = [];
             for (const transition of transitions) {
-                const timeTemp = transition.split("/");
-                if (timeTemp.length !== 2) {
-                    throw new Error(`Invalid schedule: wrong transition format: ${transition}`);
+                let mode: (typeof TRV602Z_SCHEDULE_MODES)[number];
+                let temperature: number;
+                const foundMode = modeByMode.get(transition.setting);
+                if (foundMode) {
+                    mode = foundMode;
+                    temperature = foundMode.defaultTemp ?? 0;
+                } else {
+                    const parsedTemp = Number.parseFloat(transition.setting);
+                    if (Number.isNaN(parsedTemp)) {
+                        throw new Error(
+                            `Invalid schedule setting: "${transition.setting}". Must be a valid number or one of: ${TRV602Z_SCHEDULE_MODES.map((m) => m.mode).join(", ")}`,
+                        );
+                    }
+                    temperature = Math.floor(parsedTemp * 10);
+                    if (temperature < 50 || temperature > 350) {
+                        throw new Error(`Invalid temperature: ${parsedTemp}. Must be between 5.0 and 35.0`);
+                    }
+                    const manualMode = modeByMode.get("manual");
+                    if (!manualMode) {
+                        throw new Error("Manual mode definition not found");
+                    }
+                    mode = manualMode;
                 }
-                const hourMin = timeTemp[0].split(":");
-                const hour = Number.parseInt(hourMin[0], 10);
-                const min = Number.parseInt(hourMin[1], 10);
-                const temperature = Math.floor(Number.parseFloat(timeTemp[1]) * 10);
-                if (hour < 0 || hour > 24 || min < 0 || min > 60 || temperature < 50 || temperature > 300) {
-                    throw new Error(`Invalid hour, minute or temperature of: ${transition}`);
-                }
 
-                const minutesSinceMidnight = hour * 60 + min;
-
-                const firstByte = ((minutesSinceMidnight & 3840) >> 8) + 192;
-                const secondByte = minutesSinceMidnight & 255;
-
-                payload.push(firstByte, secondByte, 64, temperature);
+                const minutesSinceMidnight = transition.minutesSinceMidnight;
+                const firstByte = ((minutesSinceMidnight & 0xf00) >> 8) + mode.offset;
+                const secondByte = minutesSinceMidnight & 0xff;
+                payload.push(firstByte, secondByte, mode.code, temperature);
             }
             return payload;
         },
     },
+    /**
+     * Value converter for Tuya TRV602Z day schedule with prepended day number (1=Mon..7=Sun).
+     *
+     * @param dayNum - Day number (1 for Monday, 7 for Sunday)
+     * @returns Value converter with prepended day number
+     */
     // biome-ignore lint/style/useNamingConvention: ignored using `--suppress`
     thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber: (dayNum: number) => {
         return {
-            from: (v: string) => valueConverter.thermostatScheduleDayMultiDP_TRV602Z.from(v),
+            from: (v: number[] | Buffer) => valueConverter.thermostatScheduleDayMultiDP_TRV602Z.from(v),
             to: (v: string) => {
                 const data = valueConverter.thermostatScheduleDayMultiDP_TRV602Z.to(v);
                 data.unshift(dayNum);
@@ -4427,6 +4486,43 @@ const tuyaFirmwareId = async (device: Zh.Device) => {
     device.meta.hasCustomFirmwareId = true;
 };
 
+interface Trv602zScheduleTransition {
+    minutesSinceMidnight: number;
+    setting: string;
+}
+
+interface Trv602zScheduleMode {
+    code: number;
+    offset: number;
+    mode: "sleep" | "eco" | "comfort" | "manual";
+    defaultTemp?: number;
+}
+
+const TRV602Z_SCHEDULE_MODES: readonly Trv602zScheduleMode[] = [
+    {code: 0x10, offset: 0xc0, mode: "sleep", defaultTemp: 0},
+    {code: 0x20, offset: 0xc0, mode: "eco", defaultTemp: 150},
+    {code: 0x30, offset: 0xc0, mode: "comfort", defaultTemp: 200},
+    {code: 0x40, offset: 0xa0, mode: "manual", defaultTemp: undefined},
+] as const;
+
+function parseScheduleTransitionTRV602Z(transition: string): Trv602zScheduleTransition {
+    const parts = transition.split("/");
+    if (parts.length !== 2) {
+        throw new Error(`Invalid schedule: wrong transition format "${transition}"`);
+    }
+    const [timePart, setting] = parts;
+    const timeParts = timePart.split(":");
+    if (timeParts.length !== 2) {
+        throw new Error(`Invalid time format in: "${transition}"`);
+    }
+    const hour = Number.parseInt(timeParts[0], 10);
+    const min = Number.parseInt(timeParts[1], 10);
+    if (Number.isNaN(hour) || Number.isNaN(min) || hour < 0 || hour > 23 || min < 0 || min > 59) {
+        throw new Error(`Invalid hour or minute in: "${transition}"`);
+    }
+    return {minutesSinceMidnight: hour * 60 + min, setting};
+}
+
 const tuyaModernExtend = {
     electricityMeasurementPoll(
         args: {
@@ -5446,6 +5542,689 @@ const tuyaModernExtend = {
         };
 
         return result;
+    },
+    /**
+     * Modern extend for Tuya TRV602Z / TRV801Z thermostatic radiator valves.
+     * Implements climate control, mode state machine, dynamic exposes based on TRV configuration,
+     * multi-mode schedule transitions, boost, and away presets.
+     *
+     * @returns ModernExtend definition for TRV602Z
+     */
+    tuyaTrv602z: (): ModernExtend => {
+        const TRV602Z_CONFIG_BIT_TEMPORARY = 0;
+        const TRV602Z_CONFIG_BIT_WINDOW = 1;
+        const TRV602Z_CONFIG_BIT_OLED_SCREEN = 4;
+        const TRV602Z_CONFIG_BIT_MOTOR_THRUST = 10;
+
+        function getActiveScheduleTemperatureTRV602Z(meta: Fz.Meta | Tz.Meta): number | null {
+            try {
+                const now = new Date();
+                const dayOfWeek = now.getDay();
+                const tuyaDay = dayOfWeek === 0 ? 7 : dayOfWeek;
+
+                const dayToDpName: Record<number, string> = {
+                    1: "schedule_monday",
+                    2: "schedule_tuesday",
+                    3: "schedule_wednesday",
+                    4: "schedule_thursday",
+                    5: "schedule_friday",
+                    6: "schedule_saturday",
+                    7: "schedule_sunday",
+                };
+                const scheduleDpName = dayToDpName[tuyaDay];
+                const scheduleString = meta.state[scheduleDpName];
+
+                if (!scheduleString || typeof scheduleString !== "string") return null;
+
+                const transitions = scheduleString
+                    .split(/\s+/)
+                    .filter(Boolean)
+                    .map((t) => {
+                        try {
+                            return parseScheduleTransitionTRV602Z(t);
+                        } catch {
+                            return null;
+                        }
+                    })
+                    .filter((t): t is Trv602zScheduleTransition => t !== null)
+                    .sort((a, b) => a.minutesSinceMidnight - b.minutesSinceMidnight);
+
+                if (transitions.length === 0) return null;
+
+                // Offset by +1 minute so the scheduled slot is considered active immediately at the exact start minute (e.g. at 08:30:00).
+                const currentMinutes = now.getHours() * 60 + now.getMinutes() + 1;
+                let activeTransition = transitions[transitions.length - 1];
+                for (let i = transitions.length - 1; i >= 0; i--) {
+                    if (currentMinutes >= transitions[i].minutesSinceMidnight) {
+                        activeTransition = transitions[i];
+                        break;
+                    }
+                }
+
+                const setting = activeTransition.setting;
+                if (setting === "comfort") return (meta.state.comfort_temperature as number | undefined) ?? null;
+                if (setting === "eco") return (meta.state.eco_temperature as number | undefined) ?? null;
+                if (setting === "sleep") return (meta.state.sleep_temperature as number | undefined) ?? null;
+
+                const temp = Number.parseFloat(setting);
+                return Number.isNaN(temp) ? null : temp;
+            } catch {
+                return null;
+            }
+        }
+
+        const fzInitialVirtualState: Fz.Converter<"genBasic", undefined, ["attributeReport", "readResponse"]> = {
+            cluster: "genBasic",
+            type: ["attributeReport", "readResponse"],
+            convert: (model, msg, publish, options, meta) => {
+                const result: KeyValue = {};
+                if (meta.state.boost_duration === undefined) result.boost_duration = 15;
+                if (meta.state.away_duration === undefined) result.away_duration = 7;
+                if (meta.state.boost_till === undefined) result.boost_till = "off";
+                if (meta.state.away_till === undefined) result.away_till = "off";
+                return Object.keys(result).length > 0 ? result : undefined;
+            },
+        };
+
+        const fzClimate: Fz.Converter<
+            "manuSpecificTuya",
+            undefined,
+            ["commandDataResponse", "commandDataReport", "commandActiveStatusReport", "commandActiveStatusReportAlt"]
+        > = {
+            cluster: "manuSpecificTuya",
+            type: ["commandDataResponse", "commandDataReport", "commandActiveStatusReport", "commandActiveStatusReportAlt"],
+            convert: (model, msg, publish, options, meta) => {
+                const dpValues = msg.data.dpValues as Array<{dp: number; datatype: number; data: Buffer}>;
+                if (!dpValues) return;
+
+                const result: KeyValue = {};
+                let regenerateExposes = false;
+
+                for (const dpValue of dpValues) {
+                    const dp = dpValue.dp;
+                    const value = getDataValue(dpValue);
+
+                    if (dp === 2) {
+                        const modeMap: Record<number, {mode: string; systemMode: string; preset: string; tempKey?: string}> = {
+                            0: {mode: "off", systemMode: "off", preset: "none", tempKey: "min_temperature"},
+                            1: {mode: "sleep", systemMode: "heat", preset: "sleep", tempKey: "sleep_temperature"},
+                            2: {mode: "eco", systemMode: "heat", preset: "eco", tempKey: "eco_temperature"},
+                            3: {mode: "comfort", systemMode: "heat", preset: "comfort", tempKey: "comfort_temperature"},
+                            4: {mode: "auto", systemMode: "auto", preset: "schedule"},
+                            5: {mode: "on", systemMode: "heat", preset: "max", tempKey: "max_temperature"},
+                        };
+                        const entry = modeMap[value as number];
+                        if (entry) {
+                            result.device_mode = entry.mode;
+                            result.system_mode = entry.systemMode;
+                            result.preset = entry.preset;
+                            const configuredTemp = entry.tempKey
+                                ? ((result[entry.tempKey] as number | undefined) ?? (meta.state[entry.tempKey] as number | undefined))
+                                : undefined;
+                            if (configuredTemp !== undefined) {
+                                result.current_heating_setpoint = configuredTemp;
+                            } else if (value === 0) {
+                                result.current_heating_setpoint =
+                                    (result.min_temperature as number | undefined) ?? (meta.state.min_temperature as number | undefined) ?? 5;
+                            } else if (value === 5) {
+                                result.current_heating_setpoint =
+                                    (result.max_temperature as number | undefined) ?? (meta.state.max_temperature as number | undefined) ?? 35;
+                            } else if (value === 4) {
+                                const schedTemp = getActiveScheduleTemperatureTRV602Z(meta);
+                                if (schedTemp !== null) result.current_heating_setpoint = schedTemp;
+                            }
+                        } else {
+                            logger.warning(`TRV602Z(fz): Received unknown device_mode: ${value}`, NS);
+                            result.system_mode = "heat";
+                            result.preset = "manual";
+                        }
+                    } else if (dp === 4) {
+                        const setpoint = (value as number) / 10;
+                        result.current_heating_setpoint = setpoint;
+
+                        const preset = (result.preset as string | undefined) ?? (meta.state.preset as string | undefined);
+                        const sleepTemp = (result.sleep_temperature as number | undefined) ?? (meta.state.sleep_temperature as number | undefined);
+                        const ecoTemp = (result.eco_temperature as number | undefined) ?? (meta.state.eco_temperature as number | undefined);
+                        const comfortTemp =
+                            (result.comfort_temperature as number | undefined) ?? (meta.state.comfort_temperature as number | undefined);
+                        const trvConfig =
+                            (result.trv_config as number | undefined) ??
+                            (meta.state.trv_config as number | undefined) ??
+                            (meta.device.meta.trv_config as number | undefined);
+
+                        if (preset === "sleep" || preset === "eco" || preset === "comfort") {
+                            const target = preset === "sleep" ? sleepTemp : preset === "eco" ? ecoTemp : comfortTemp;
+                            if (target !== undefined && Math.abs(setpoint - target) >= 0.1) {
+                                result.preset = "manual";
+                            }
+                        } else if (preset === "manual") {
+                            if (comfortTemp !== undefined && Math.abs(setpoint - comfortTemp) < 0.1) {
+                                result.preset = "comfort";
+                            } else if (ecoTemp !== undefined && Math.abs(setpoint - ecoTemp) < 0.1) {
+                                result.preset = "eco";
+                            } else if (sleepTemp !== undefined && Math.abs(setpoint - sleepTemp) < 0.1) {
+                                result.preset = "sleep";
+                            }
+                        } else if (preset === "schedule" || preset === "temporary") {
+                            const scheduledTemp = getActiveScheduleTemperatureTRV602Z(meta);
+                            if (scheduledTemp !== null && Math.abs(setpoint - scheduledTemp) < 0.1) {
+                                result.preset = "schedule";
+                            } else if (trvConfig !== undefined && ((trvConfig >> TRV602Z_CONFIG_BIT_TEMPORARY) & 1) === 1) {
+                                result.preset = "temporary";
+                            }
+                        }
+                    } else if (dp === 118) {
+                        const minutes = value as number;
+                        if (minutes > 0) {
+                            const till = new Date();
+                            till.setMinutes(till.getMinutes() + minutes);
+                            result.preset = "boost";
+                            result.boost_duration_set = minutes;
+                            result.boost_till = till.toISOString();
+                        } else {
+                            const currentPreset = (result.preset as string | undefined) ?? (meta.state.preset as string | undefined);
+                            if (currentPreset === "boost") {
+                                result.preset = "schedule";
+                                const schedTemp = getActiveScheduleTemperatureTRV602Z(meta);
+                                if (schedTemp !== null) result.current_heating_setpoint = schedTemp;
+                            }
+                            result.boost_duration_set = 0;
+                            result.boost_till = "off";
+                        }
+                    } else if (dp === 117) {
+                        const days = value as number;
+                        if (days > 0) {
+                            const till = new Date();
+                            till.setDate(till.getDate() + days);
+                            result.preset = "away";
+                            result.away_duration_set = days;
+                            result.away_till = till.toISOString();
+                        } else {
+                            const currentPreset = (result.preset as string | undefined) ?? (meta.state.preset as string | undefined);
+                            if (currentPreset === "away") {
+                                result.preset = "eco";
+                                const ecoTemp = (result.eco_temperature as number | undefined) ?? (meta.state.eco_temperature as number | undefined);
+                                if (ecoTemp !== undefined) {
+                                    result.current_heating_setpoint = ecoTemp;
+                                }
+                            }
+                            result.away_duration_set = 0;
+                            result.away_till = "off";
+                        }
+                    } else if (dp === 119 || dp === 120 || dp === 121) {
+                        const temp = (value as number) / 10;
+                        const dpMap: Record<number, {key: string; preset: string}> = {
+                            119: {key: "comfort_temperature", preset: "comfort"},
+                            120: {key: "eco_temperature", preset: "eco"},
+                            121: {key: "sleep_temperature", preset: "sleep"},
+                        };
+                        const entry = dpMap[dp];
+                        result[entry.key] = temp;
+                        const systemMode = (result.system_mode as string | undefined) ?? (meta.state.system_mode as string | undefined);
+                        if (systemMode !== "auto") {
+                            const currentSetpoint =
+                                (result.current_heating_setpoint as number | undefined) ??
+                                (meta.state.current_heating_setpoint as number | undefined);
+                            if (currentSetpoint !== undefined && Math.abs(currentSetpoint - temp) < 0.1) {
+                                result.preset = entry.preset;
+                            }
+                        }
+                    } else if (
+                        dp === 125 ||
+                        dp === 110 ||
+                        dp === 111 ||
+                        dp === 113 ||
+                        dp === 127 ||
+                        dp === 115 ||
+                        dp === 122 ||
+                        dp === 9 ||
+                        dp === 10
+                    ) {
+                        const metaKeys: Record<number, string> = {
+                            125: "trv_config",
+                            110: "motor_thrust",
+                            111: "display_brightness",
+                            113: "screen_orientation",
+                            127: "regulation_mode",
+                            115: "hysteresis_threshold",
+                            122: "frost_protection",
+                            9: "max_temperature",
+                            10: "min_temperature",
+                        };
+                        const featureConverters: Record<number, (v: unknown) => unknown> = {
+                            9: (v) => (typeof v === "number" ? v / 10 : v),
+                            10: (v) => (typeof v === "number" ? v / 10 : v),
+                            110: (v) => (typeof v === "number" ? (["strong", "middle", "weak"][v] ?? v) : v),
+                            111: (v) => (typeof v === "number" ? (["high", "medium", "low"][v] ?? v) : v),
+                            113: (v) => (typeof v === "number" ? (["up", "down", "left", "right"][v] ?? v) : v),
+                            115: (v) => (typeof v === "number" ? v / 10 : v),
+                            122: (v) => (v === 1 || v === true ? "ON" : "OFF"),
+                            127: (v) => (v === 0 ? "pid" : v === 1 ? "hysteresis" : v),
+                        };
+                        const metaKey = metaKeys[dp];
+                        if (metaKey) {
+                            const val = featureConverters[dp] ? featureConverters[dp](value) : value;
+                            if (dp === 9) result.max_temperature = val;
+                            if (dp === 10) result.min_temperature = val;
+                            if (meta.device.meta[metaKey] !== val) {
+                                meta.device.meta[metaKey] = val;
+                                meta.device.save();
+                                regenerateExposes = true;
+                            }
+                        }
+                    }
+                }
+
+                if (regenerateExposes && meta.deviceExposesChanged) {
+                    meta.deviceExposesChanged();
+                }
+
+                return Object.keys(result).length > 0 ? result : undefined;
+            },
+        };
+
+        const tzClimate: Tz.Converter = {
+            key: ["system_mode", "preset", "current_heating_setpoint"],
+            convertSet: async (entity, key, value, meta) => {
+                if (key === "current_heating_setpoint") {
+                    utils.assertNumber(value, key);
+                    const minTemp = (meta.state.min_temperature as number | undefined) ?? 5;
+                    const maxTemp = (meta.state.max_temperature as number | undefined) ?? 35;
+                    const clamped = Math.min(Math.max(value, minTemp), maxTemp);
+                    await sendDataPointValue(entity, 4, Math.round(clamped * 10));
+                    return {state: {current_heating_setpoint: clamped}};
+                }
+
+                let targetSystemMode =
+                    key === "system_mode" ? (value as string) : typeof meta.state.system_mode === "string" ? meta.state.system_mode : "heat";
+                let targetPreset = key === "preset" ? (value as string) : typeof meta.state.preset === "string" ? meta.state.preset : "manual";
+
+                if (key === "system_mode") {
+                    if (value === "auto") targetPreset = "schedule";
+                    else if (value === "heat") targetPreset = "manual";
+                    else targetPreset = "none";
+                }
+
+                if (key === "preset") {
+                    if (value === "temporary") {
+                        targetSystemMode = "auto";
+                        targetPreset = "schedule";
+                    } else if (value === "schedule" || value === "boost") {
+                        targetSystemMode = "auto";
+                    } else if (value === "none" && targetSystemMode !== "off") {
+                        targetSystemMode = "off";
+                    } else if (value !== "none" && targetSystemMode !== "heat") {
+                        targetSystemMode = "heat";
+                    }
+                }
+
+                const currentBoostDurationSet = (meta.state.boost_duration_set as number | undefined) ?? 0;
+                const currentAwayDurationSet = (meta.state.away_duration_set as number | undefined) ?? 0;
+                const resultState: KeyValue = {};
+
+                if (targetPreset !== "boost" && currentBoostDurationSet > 0) {
+                    await sendDataPointValue(entity, 118, 0);
+                    resultState.boost_duration_set = 0;
+                    resultState.boost_till = "off";
+                    if (typeof meta.state.setpoint_after_boost === "number") {
+                        await sendDataPointValue(entity, 4, Math.round(meta.state.setpoint_after_boost * 10));
+                        resultState.current_heating_setpoint = meta.state.setpoint_after_boost;
+                        resultState.setpoint_after_boost = null;
+                    }
+                }
+                if (targetPreset !== "away" && currentAwayDurationSet > 0) {
+                    await sendDataPointValue(entity, 117, 0);
+                    resultState.away_duration_set = 0;
+                    resultState.away_till = "off";
+                }
+
+                switch (targetSystemMode) {
+                    case "off":
+                        await sendDataPointEnum(entity, 2, 0);
+                        resultState.system_mode = "off";
+                        resultState.device_mode = "off";
+                        resultState.preset = "none";
+                        break;
+                    case "heat":
+                        resultState.system_mode = "heat";
+                        switch (targetPreset) {
+                            case "manual": {
+                                await sendDataPointEnum(entity, 2, 3);
+                                resultState.device_mode = "comfort";
+                                resultState.preset = "manual";
+                                const setpoint =
+                                    (resultState.current_heating_setpoint as number | undefined) ??
+                                    (meta.state.current_heating_setpoint as number | undefined) ??
+                                    20;
+                                await sendDataPointValue(entity, 4, Math.round(setpoint * 10));
+                                break;
+                            }
+                            case "comfort":
+                                await sendDataPointEnum(entity, 2, 3);
+                                resultState.device_mode = "comfort";
+                                resultState.preset = "comfort";
+                                break;
+                            case "eco":
+                                await sendDataPointEnum(entity, 2, 2);
+                                resultState.device_mode = "eco";
+                                resultState.preset = "eco";
+                                break;
+                            case "sleep":
+                                await sendDataPointEnum(entity, 2, 1);
+                                resultState.device_mode = "sleep";
+                                resultState.preset = "sleep";
+                                break;
+                            case "max":
+                                await sendDataPointEnum(entity, 2, 5);
+                                resultState.device_mode = "on";
+                                resultState.preset = "max";
+                                break;
+                            case "away": {
+                                const awayDuration = (meta.state.away_duration as number | undefined) ?? 7;
+                                if (currentAwayDurationSet === 0) {
+                                    await sendDataPointValue(entity, 117, awayDuration);
+                                }
+                                resultState.preset = "away";
+                                break;
+                            }
+                            default:
+                                break;
+                        }
+                        break;
+                    case "auto":
+                        resultState.system_mode = "auto";
+                        switch (targetPreset) {
+                            case "schedule":
+                                await sendDataPointEnum(entity, 2, 4);
+                                resultState.device_mode = "auto";
+                                resultState.preset = "schedule";
+                                break;
+                            case "boost": {
+                                if (meta.state.device_mode !== "auto") {
+                                    await sendDataPointEnum(entity, 2, 4);
+                                    resultState.device_mode = "auto";
+                                }
+                                const boostDuration = (meta.state.boost_duration as number | undefined) ?? 15;
+                                if (currentBoostDurationSet === 0) {
+                                    resultState.setpoint_after_boost = meta.state.current_heating_setpoint;
+                                    await sendDataPointValue(entity, 118, boostDuration);
+                                }
+                                resultState.preset = "boost";
+                                break;
+                            }
+                            default:
+                                break;
+                        }
+                        break;
+                    default:
+                        throw new Error(`Invalid system mode value: ${targetSystemMode}`);
+                }
+
+                return {state: resultState};
+            },
+        };
+
+        const tzDurations: Tz.Converter = {
+            key: ["boost_duration", "away_duration"],
+            convertSet: (entity, key, value, meta) => {
+                if (key === "boost_duration") {
+                    utils.assertNumber(value, key);
+                    if (value < 1 || value > 120) throw new Error("boost_duration must be between 1 and 120 minutes");
+                    return {state: {boost_duration: value}};
+                }
+                utils.assertNumber(value, key);
+                if (value < 1 || value > 364) throw new Error("away_duration must be between 1 and 364 days");
+                return {state: {away_duration: value}};
+            },
+        };
+
+        const createOptionalExposes = (features: {
+            window?: boolean;
+            motorThrust?: boolean;
+            displayBrightness?: boolean;
+            screenOrientation?: string[];
+            regulationMode?: boolean;
+            hysteresis?: boolean;
+            frostProtection?: boolean;
+        }): Expose[] => {
+            const list: Expose[] = [];
+            if (features.window) {
+                list.push(
+                    e
+                        .binary("window_detection", ea.STATE_SET, "ON", "OFF")
+                        .withDescription("(Optional) Enables/disables window detection on the device.")
+                        .withCategory("config"),
+                    e.window_open(),
+                );
+            }
+            if (features.motorThrust) {
+                list.push(
+                    e
+                        .enum("motor_thrust", ea.STATE_SET, ["strong", "middle", "weak"])
+                        .withCategory("config")
+                        .withDescription("(Optional) Might be not supported for some devices."),
+                );
+            }
+            if (features.displayBrightness) {
+                list.push(e.enum("display_brightness", ea.STATE_SET, ["high", "medium", "low"]).withCategory("config"));
+            }
+            if (features.screenOrientation) {
+                list.push(
+                    e
+                        .enum("screen_orientation", ea.STATE_SET, features.screenOrientation)
+                        .withCategory("config")
+                        .withDescription("Screen rotation (*may not be supported by all devices)"),
+                );
+            }
+            if (features.regulationMode) {
+                list.push(
+                    e
+                        .enum("regulation_mode", ea.STATE_SET, ["pid", "hysteresis"])
+                        .withCategory("config")
+                        .withDescription(
+                            ">> PID Mode: The TRV constantly adjusts heating to keep the temperature as close as possible to the target. This improves comfort and reduces temperature swings but uses more energy because it makes continuous adjustments. >> Hysteresis Mode: The TRV turns heating on when the temperature drops below a set point and off when it rises above it, using a buffer (Hysteresis Threshold) to prevent frequent switching. This provides stable and reliable control.",
+                        ),
+                );
+            }
+            if (features.hysteresis) {
+                list.push(
+                    e
+                        .numeric("hysteresis_threshold", ea.STATE_SET)
+                        .withCategory("config")
+                        .withUnit("°C")
+                        .withValueMin(0.5)
+                        .withValueMax(5)
+                        .withValueStep(0.1)
+                        .withDescription(
+                            "Only used in Hysteresis Regulation Mode. The offset from the target temperature in which the temperature has to change for the heating state to change. This is to prevent erratically turning on/off when the temperature is close to the target",
+                        ),
+                );
+            }
+            if (features.frostProtection) {
+                list.push(
+                    e
+                        .binary("frost_protection", ea.STATE_SET, "ON", "OFF")
+                        .withCategory("config")
+                        .withDescription(
+                            "To be used in Off mode. The valve will open when the room temperature is lower than 5 °C and close when it rises to 7 °C. (Optional Feature, added because TRV reported DP122)",
+                        ),
+                );
+            }
+            return list;
+        };
+
+        const exposesFunction: DefinitionExposesFunction = (device: Zh.Device | DummyDevice, options: KeyValue): Expose[] => {
+            let presets = ["manual", "sleep", "eco", "comfort", "max", "away", "boost", "schedule"];
+            let presetsDescription = "Select TRV preset";
+            let screenOrientationOptions = ["up", "down"];
+            const optionalExpose: Expose[] = [];
+
+            let minTemperature = 5;
+            let maxTemperature = 35;
+            const calibrationRange = typeof options?.calibration_range === "number" ? options.calibration_range : 10;
+
+            if (device && !utils.isDummyDevice(device) && device.meta) {
+                if (device.meta.min_temperature !== undefined) minTemperature = device.meta.min_temperature as number;
+                if (device.meta.max_temperature !== undefined) maxTemperature = device.meta.max_temperature as number;
+
+                const trvConfig = device.meta.trv_config as number | undefined;
+                if (trvConfig !== undefined) {
+                    if (((trvConfig >> TRV602Z_CONFIG_BIT_TEMPORARY) & 1) === 1) {
+                        presets = ["manual", "sleep", "eco", "comfort", "max", "away", "boost", "schedule", "temporary"];
+                        presetsDescription =
+                            'Select TRV preset (NOTE: Preset "Temporary" cannot be selected. It can be triggered only by TRV when temperature is adjusted manually while TRV is in "Schedule".)';
+                    }
+                    if (((trvConfig >> TRV602Z_CONFIG_BIT_OLED_SCREEN) & 1) === 1) {
+                        screenOrientationOptions = ["up", "down", "left", "right"];
+                    }
+                }
+
+                optionalExpose.push(
+                    ...createOptionalExposes({
+                        window: trvConfig !== undefined && ((trvConfig >> TRV602Z_CONFIG_BIT_WINDOW) & 1) === 1,
+                        motorThrust:
+                            device.meta.motor_thrust !== undefined &&
+                            trvConfig !== undefined &&
+                            ((trvConfig >> TRV602Z_CONFIG_BIT_MOTOR_THRUST) & 1) === 1,
+                        displayBrightness: device.meta.display_brightness !== undefined,
+                        screenOrientation: device.meta.screen_orientation !== undefined ? screenOrientationOptions : undefined,
+                        regulationMode: device.meta.regulation_mode !== undefined,
+                        hysteresis: device.meta.hysteresis_threshold !== undefined,
+                        frostProtection: device.meta.frost_protection !== undefined,
+                    }),
+                );
+            } else if (!device || utils.isDummyDevice(device)) {
+                presets = ["manual", "sleep", "eco", "comfort", "max", "away", "boost", "schedule", "temporary"];
+                optionalExpose.push(
+                    ...createOptionalExposes({
+                        window: true,
+                        motorThrust: true,
+                        displayBrightness: true,
+                        screenOrientation: ["up", "down", "left", "right"],
+                        regulationMode: true,
+                        hysteresis: true,
+                        frostProtection: true,
+                    }),
+                );
+            }
+
+            const defaultExpose: Expose[] = [
+                e.battery(),
+                e
+                    .enum("fault", ea.STATE, ["clear", "fault_sensor", "fault_motor", "fault_low_batt", "fault_ug_low_batt", "fault_poor_bat"])
+                    .withCategory("diagnostic")
+                    .withDescription("Fault status of the device (clear = nothing)"),
+                e.child_lock(),
+                e.position().withDescription("Current valve opening %").withCategory("diagnostic"),
+                e
+                    .climate()
+                    .withLocalTemperature(ea.STATE)
+                    .withSetpoint("current_heating_setpoint", minTemperature, maxTemperature, 0.5, ea.STATE_SET)
+                    .withLocalTemperatureCalibration(-calibrationRange, calibrationRange, 0.1, ea.STATE_SET)
+                    .withSystemMode(["off", "heat", "auto"], ea.STATE_SET)
+                    .withPreset(presets, presetsDescription)
+                    .withRunningState(["idle", "heat"], ea.STATE),
+                e
+                    .enum("device_mode", ea.STATE, ["off", "sleep", "eco", "comfort", "auto", "on"])
+                    .withDescription("Actual raw TRV running mode reported by the device")
+                    .withCategory("diagnostic"),
+                ...tuyaExposes
+                    .scheduleAllDays(
+                        ea.STATE_SET,
+                        "00:00/16.0 08:30/23 12:30/comfort 14:00/eco 18:00/sleep 22:00/eco. Up to 6 transitions of format: HH:MM/<temp or mode>. Configurable modes: sleep|eco|comfort",
+                    )
+                    .map((text) => text.withCategory("config")),
+                e
+                    .max_temperature()
+                    .withCategory("config")
+                    .withValueMin(20)
+                    .withValueMax(35)
+                    .withValueStep(1)
+                    .withDescription("Upper temperature limit for setpoint"),
+                e
+                    .min_temperature()
+                    .withCategory("config")
+                    .withValueMin(5)
+                    .withValueMax(15)
+                    .withValueStep(1)
+                    .withDescription("Lower temperature limit for setpoint"),
+                e
+                    .comfort_temperature()
+                    .withCategory("config")
+                    .withValueMin(5)
+                    .withValueMax(35)
+                    .withValueStep(0.5)
+                    .withDescription("Temperature used for Comfort preset"),
+                e
+                    .eco_temperature()
+                    .withCategory("config")
+                    .withValueMin(5)
+                    .withValueMax(35)
+                    .withValueStep(0.5)
+                    .withDescription("Temperature used for Eco preset"),
+                e
+                    .numeric("sleep_temperature", ea.STATE_SET)
+                    .withCategory("config")
+                    .withUnit("°C")
+                    .withValueMin(5)
+                    .withValueMax(35)
+                    .withValueStep(0.5)
+                    .withDescription("Temperature used for Sleep preset and Away mode"),
+                e.text("boost_till", ea.STATE).withCategory("diagnostic").withDescription("Approximate time when Boost mode will end"),
+                e
+                    .numeric("boost_duration_set", ea.STATE)
+                    .withCategory("diagnostic")
+                    .withUnit("minutes")
+                    .withDescription("Currently active Boost duration (0 if not active)"),
+                e
+                    .numeric("boost_duration", ea.STATE_SET)
+                    .withCategory("config")
+                    .withUnit("minutes")
+                    .withDescription(
+                        "Duration for which the Boost mode will be activated. The thermostat will return to the Auto mode (or Away mode if it was active) after the set duration",
+                    )
+                    .withValueMin(1)
+                    .withValueMax(120)
+                    .withPreset("15 min", 15, "15 minutes")
+                    .withPreset("30 min", 30, "30 minutes")
+                    .withPreset("1 hour", 60, "1 hour")
+                    .withPreset("1.5 hours", 90, "1.5 hours")
+                    .withPreset("2 hours", 120, "2 hours"),
+                e.text("away_till", ea.STATE).withCategory("diagnostic").withDescription("Approximate date when Away mode will end"),
+                e
+                    .numeric("away_duration_set", ea.STATE)
+                    .withCategory("diagnostic")
+                    .withUnit("days")
+                    .withDescription("Currently active Away duration (0 if not active)"),
+                e
+                    .numeric("away_duration", ea.STATE_SET)
+                    .withCategory("config")
+                    .withUnit("days")
+                    .withDescription(
+                        "Duration for which the Away mode will be activated. The thermostat will use the Sleep mode temperature setting and return to the previous mode after the set duration",
+                    )
+                    .withValueMin(1)
+                    .withValueMax(364),
+                e.numeric("trv_config", ea.STATE).withCategory("diagnostic").withDescription("Shows the TRV configuration"),
+            ];
+
+            return [...defaultExpose, ...optionalExpose];
+        };
+
+        return {
+            fromZigbee: [fzInitialVirtualState, fzClimate],
+            toZigbee: [tzClimate, tzDurations],
+            exposes: [exposesFunction],
+            options: [
+                e
+                    .numeric("calibration_range", ea.SET)
+                    .withValueMin(0.1)
+                    .withValueMax(10)
+                    .withValueStep(0.1)
+                    .withDescription("Temperature calibration range (from -X to +X °C). Default: 10"),
+            ],
+            isModernExtend: true,
+        };
     },
 };
 

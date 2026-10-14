@@ -11947,91 +11947,19 @@ export const definitions: DefinitionWithExtend[] = [
         whiteLabel: [tuya.whitelabel("Moes", "TRV801Z", "Thermostatic radiator valve", ["_TZE204_qyr2m29i", "_TZE284_ltwbm23f"])],
         // _TZE204_qyr2m29i requires 2000
         // https://github.com/Koenkk/zigbee2mqtt/issues/30054
-        extend: [tuyaBase({dp: true, timeStart: "2000"})],
-        exposes: [
-            e.battery(),
-            e.child_lock(),
-            e.max_temperature(),
-            e.min_temperature(),
-            e.position(),
-            e.window_detection(),
-            e
-                .numeric("boost_timeset_countdown", ea.STATE_SET)
-                .withUnit("m")
-                .withDescription(
-                    "Setting " +
-                        "minimum 0 - maximum 120 minutes boost time. The boost function is activated. The remaining " +
-                        "time for the function will be counted down in minutes ( 120 to 0 ).",
-                )
-                .withValueMin(0)
-                .withValueMax(120),
-            e.binary("frost_protection", ea.STATE_SET, "ON", "OFF").withDescription("Antifreeze function"),
-            e.binary("window", ea.STATE, "OPEN", "CLOSE").withDescription("Window status closed or open "),
-            e
-                .climate()
-                .withLocalTemperature(ea.STATE)
-                .withSetpoint("current_heating_setpoint", 5, 35, 0.5, ea.STATE_SET)
-                .withLocalTemperatureCalibration(-10, 10, 0.1, ea.STATE_SET)
-                .withPreset(["off", "antifrost", "eco", "comfort", "auto", "on"])
-                .withRunningState(["idle", "heat"], ea.STATE)
-                .withSystemMode(["auto", "heat", "off"], ea.STATE),
-            ...tuya.exposes.scheduleAllDays(ea.STATE_SET, "HH:MM/C HH:MM/C HH:MM/C HH:MM/C HH:MM/C HH:MM/C"),
-            e.comfort_temperature().withValueMin(5).withValueMax(30).withDescription("Comfort mode temperature"),
-            e.eco_temperature().withValueMin(5).withValueMax(30).withDescription("Eco mode temperature"),
-            e.holiday_temperature().withValueMin(5).withValueMax(30).withDescription("Antifreeze mode temperature"),
-            e.enum("display_brightness", ea.STATE_SET, ["high", "medium", "low"]).withDescription("Display brightness"),
-            e.enum("screen_orientation", ea.STATE_SET, ["up", "down"]).withDescription("Screen orientation"),
-            e
-                .enum("hysteresis", ea.STATE_SET, ["comfort", "eco"])
-                .withDescription(
-                    "Hysteresis - comfort > switches off/on exactly at reached " +
-                        "temperature with valve smooth from 0 to 100%, eco > 0.5 degrees above or below, valve either 0 or 100%",
-                ),
-            e.enum("motor_thrust", ea.STATE_SET, ["strong", "middle", "weak"]),
+        extend: [
+            tuya.modernExtend.tuyaTrv602z(),
+            tuya.modernExtend.tuyaBase({
+                dp: true,
+                timeStart: "2000",
+                forceTimeUpdates: true,
+                queryOnConfigure: true,
+                queryOnDeviceAnnounce: true,
+            }),
         ],
         meta: {
             tuyaDatapoints: [
-                [
-                    2,
-                    null,
-                    tuya.valueConverter.thermostatSystemModeAndPresetMap({
-                        fromMap: {
-                            0: {deviceMode: "off", systemMode: "off", preset: "off"},
-                            1: {deviceMode: "antifrost", systemMode: "auto", preset: "antifrost"},
-                            2: {deviceMode: "eco", systemMode: "auto", preset: "eco"},
-                            3: {deviceMode: "comfort", systemMode: "auto", preset: "comfort"},
-                            4: {deviceMode: "auto", systemMode: "auto", preset: "auto"},
-                            5: {deviceMode: "on", systemMode: "heat", preset: "on"},
-                        },
-                    }),
-                ],
-                [
-                    2,
-                    "preset",
-                    tuya.valueConverter.thermostatSystemModeAndPresetMap({
-                        toMap: {
-                            off: new tuya.Enum(0),
-                            antifrost: new tuya.Enum(1),
-                            eco: new tuya.Enum(2),
-                            comfort: new tuya.Enum(3),
-                            auto: new tuya.Enum(4),
-                            on: new tuya.Enum(5),
-                        },
-                    }),
-                ],
-                [
-                    2,
-                    "system_mode",
-                    tuya.valueConverter.thermostatSystemModeAndPresetMap({
-                        toMap: {
-                            off: new tuya.Enum(0),
-                            auto: new tuya.Enum(4),
-                            heat: new tuya.Enum(5),
-                        },
-                    }),
-                ],
                 [3, "running_state", tuya.valueConverterBasic.lookup({heat: 1, idle: 0})],
-                [4, "current_heating_setpoint", tuya.valueConverter.divideBy10],
                 [5, "local_temperature", tuya.valueConverter.divideBy10],
                 [6, "battery", tuya.valueConverter.raw],
                 [
@@ -12044,23 +11972,21 @@ export const definitions: DefinitionWithExtend[] = [
                 ],
                 [9, "max_temperature", tuya.valueConverter.divideBy10],
                 [10, "min_temperature", tuya.valueConverter.divideBy10],
+                [14, "window_detection", tuya.valueConverter.onOff],
+                [15, "window_open", tuya.valueConverter.trueFalseEnum1],
                 [
-                    14,
-                    "window_detection",
+                    35,
+                    "fault",
                     tuya.valueConverterBasic.lookup({
-                        ON: true,
-                        OFF: false,
+                        clear: 0,
+                        fault_sensor: 1,
+                        fault_motor: 2,
+                        fault_low_batt: 4,
+                        fault_ug_low_batt: 8,
+                        fault_poor_bat: 16,
                     }),
                 ],
-                [
-                    15,
-                    "window",
-                    tuya.valueConverterBasic.lookup({
-                        CLOSE: tuya.enum(0),
-                        OPEN: tuya.enum(1),
-                    }),
-                ],
-                [47, "local_temperature_calibration", tuya.valueConverter.divideBy10],
+                [47, "local_temperature_calibration", tuya.valueConverter.localTemperatureCalibration32],
                 [102, "schedule_monday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(1)],
                 [103, "schedule_tuesday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(2)],
                 [104, "schedule_wednesday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(3)],
@@ -12092,20 +12018,25 @@ export const definitions: DefinitionWithExtend[] = [
                     tuya.valueConverterBasic.lookup({
                         up: tuya.enum(0),
                         down: tuya.enum(1),
+                        left: tuya.enum(2),
+                        right: tuya.enum(3),
                     }),
                 ],
                 [114, "position", tuya.valueConverter.divideBy10],
-                [118, "boost_timeset_countdown", tuya.valueConverter.raw],
+                [115, "hysteresis_threshold", tuya.valueConverter.divideBy10],
+                [117, "away_duration_set", tuya.valueConverter.raw],
+                [118, "boost_duration_set", tuya.valueConverter.raw],
                 [119, "comfort_temperature", tuya.valueConverter.divideBy10],
                 [120, "eco_temperature", tuya.valueConverter.divideBy10],
-                [121, "holiday_temperature", tuya.valueConverter.divideBy10],
+                [121, "sleep_temperature", tuya.valueConverter.divideBy10],
                 [122, "frost_protection", tuya.valueConverter.onOff],
+                [125, "trv_config", tuya.valueConverter.raw],
                 [
                     127,
-                    "hysteresis",
+                    "regulation_mode",
                     tuya.valueConverterBasic.lookup({
-                        comfort: tuya.enum(0),
-                        eco: tuya.enum(1),
+                        pid: tuya.enum(0),
+                        hysteresis: tuya.enum(1),
                     }),
                 ],
             ],
