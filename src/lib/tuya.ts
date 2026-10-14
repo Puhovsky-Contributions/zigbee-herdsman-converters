@@ -5625,7 +5625,7 @@ const tuyaModernExtend = {
      * @returns ModernExtend definition for TRV602Z
      */
     tuyaTrv602z: (): ModernExtend => {
-        const fzVirtualProperties: Fz.Converter<"genBasic", undefined, ["attributeReport", "readResponse"]> = {
+        const fzInitialVirtualState: Fz.Converter<"genBasic", undefined, ["attributeReport", "readResponse"]> = {
             cluster: "genBasic",
             type: ["attributeReport", "readResponse"],
             convert: (model, msg, publish, options, meta) => {
@@ -5847,8 +5847,9 @@ const tuyaModernExtend = {
                     return {state: {current_heating_setpoint: clamped}};
                 }
 
-                let targetSystemMode = key === "system_mode" ? (value as string) : (meta.state.system_mode as string);
-                let targetPreset = key === "preset" ? (value as string) : (meta.state.preset as string);
+                let targetSystemMode =
+                    key === "system_mode" ? (value as string) : typeof meta.state.system_mode === "string" ? meta.state.system_mode : "heat";
+                let targetPreset = key === "preset" ? (value as string) : typeof meta.state.preset === "string" ? meta.state.preset : "manual";
 
                 if (key === "system_mode") {
                     if (value === "auto") targetPreset = "schedule";
@@ -6223,7 +6224,7 @@ const tuyaModernExtend = {
         };
 
         return {
-            fromZigbee: [fzVirtualProperties, fzClimate],
+            fromZigbee: [fzInitialVirtualState, fzClimate],
             toZigbee: [tzClimate, tzDurations],
             exposes: [exposesFunction],
             options: [
