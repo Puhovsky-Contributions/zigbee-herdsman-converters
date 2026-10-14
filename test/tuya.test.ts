@@ -723,6 +723,12 @@ describe("lib/tuya", () => {
                 preset: "max",
                 current_heating_setpoint: 35,
             });
+
+            // Unknown mode: fallback to heat/manual
+            expect(climateFz?.convert(definition as Definition, createMsg(99), () => {}, {}, meta)).toStrictEqual({
+                system_mode: "heat",
+                preset: "manual",
+            });
         });
 
         it("handles boost start and cancellation in tz preserving and restoring setpoint", async () => {
@@ -786,6 +792,55 @@ describe("lib/tuya", () => {
             } as Tz.Meta;
             const changeRes = await climateTz?.convertSet?.(device.endpoints[0], "preset", "comfort", metaNullSetpoint);
             expect(changeRes?.state?.current_heating_setpoint).toBeUndefined();
+
+            // Canceling boost directly to manual restores pre-boost setpoint
+            const metaInBoostManual = {
+                state: {
+                    preset: "boost",
+                    current_heating_setpoint: 30.0,
+                    boost_duration_set: 15,
+                    setpoint_after_boost: 20.5,
+                },
+                device,
+                endpoint_name: null,
+                options: null,
+                message: null,
+                mapped: definition,
+                publish: null,
+            } as Tz.Meta;
+            const cancelManualRes = await climateTz?.convertSet?.(device.endpoints[0], "preset", "manual", metaInBoostManual);
+            expect(cancelManualRes).toMatchObject({
+                state: {
+                    preset: "manual",
+                    boost_duration_set: 0,
+                    boost_till: "off",
+                    current_heating_setpoint: 20.5,
+                    setpoint_after_boost: null,
+                },
+            });
+        });
+
+        it("handles intra-packet DP 10 preceding DP 2", () => {
+            const climateFz = definition?.fromZigbee?.find((c) => c.cluster === "manuSpecificTuya");
+            const createMultiMsg = () =>
+                ({
+                    data: {
+                        dpValues: [
+                            {dp: 10, datatype: 2, data: Buffer.from([0, 0, 0, 70])}, // min_temp = 7.0
+                            {dp: 2, datatype: 4, data: Buffer.from([0])}, // mode 0 = off
+                        ],
+                    },
+                }) as unknown as Fz.Message;
+
+            const testDevice = {meta: {}, save: vi.fn()} as unknown as Zh.Device;
+            const meta = {state: {}, device: testDevice} as unknown as Fz.Meta;
+            const res = climateFz?.convert(definition as Definition, createMultiMsg(), () => {}, {}, meta);
+            expect(res).toMatchObject({
+                min_temperature: 7.0,
+                device_mode: "off",
+                system_mode: "off",
+                current_heating_setpoint: 7.0,
+            });
         });
 
         it("saves converted string values to device.meta for optional features", () => {

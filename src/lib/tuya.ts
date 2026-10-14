@@ -5685,6 +5685,10 @@ const tuyaModernExtend = {
                                 const schedTemp = getActiveScheduleTemperatureTRV602Z(meta);
                                 if (schedTemp !== null) result.current_heating_setpoint = schedTemp;
                             }
+                        } else {
+                            logger.warning(`TRV602Z(fz): Received unknown device_mode: ${value}`, NS);
+                            result.system_mode = "heat";
+                            result.preset = "manual";
                         }
                     } else if (dp === 4) {
                         const setpoint = (value as number) / 10;
@@ -5799,12 +5803,21 @@ const tuyaModernExtend = {
                             9: "max_temperature",
                             10: "min_temperature",
                         };
+                        const featureConverters: Record<number, (v: unknown) => unknown> = {
+                            9: (v) => (v as number) / 10,
+                            10: (v) => (v as number) / 10,
+                            110: (v) => ["strong", "middle", "weak"][v as number] ?? v,
+                            111: (v) => ["high", "medium", "low"][v as number] ?? v,
+                            113: (v) => ["up", "down", "left", "right"][v as number] ?? v,
+                            115: (v) => (v as number) / 10,
+                            122: (v) => (v === 1 ? "ON" : "OFF"),
+                            127: (v) => (v === 0 ? "pid" : v === 1 ? "hysteresis" : v),
+                        };
                         const metaKey = metaKeys[dp];
                         if (metaKey) {
-                            const dpEntry = model.meta?.tuyaDatapoints?.find((d) => d[0] === dp);
-                            const converter = dpEntry?.[2] as {from?: (v: unknown) => unknown} | undefined;
-                            const fallbackVal = dp === 9 || dp === 10 || dp === 115 ? (value as number) / 10 : value;
-                            const val = converter?.from ? converter.from(value) : fallbackVal;
+                            const val = featureConverters[dp] ? featureConverters[dp](value) : value;
+                            if (dp === 9) result.max_temperature = val;
+                            if (dp === 10) result.min_temperature = val;
                             if (meta.device.meta[metaKey] !== val) {
                                 meta.device.meta[metaKey] = val;
                                 meta.device.save();
@@ -5890,7 +5903,10 @@ const tuyaModernExtend = {
                                 await sendDataPointEnum(entity, 2, 3);
                                 resultState.device_mode = "comfort";
                                 resultState.preset = "manual";
-                                const setpoint = (meta.state.current_heating_setpoint as number | undefined) ?? 20;
+                                const setpoint =
+                                    (resultState.current_heating_setpoint as number | undefined) ??
+                                    (meta.state.current_heating_setpoint as number | undefined) ??
+                                    20;
                                 await sendDataPointValue(entity, 4, Math.round(setpoint * 10));
                                 break;
                             }
