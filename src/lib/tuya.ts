@@ -1555,6 +1555,20 @@ interface Trv602zScheduleTransition {
     setting: string;
 }
 
+interface Trv602zScheduleMode {
+    code: number;
+    offset: number;
+    mode: "sleep" | "eco" | "comfort" | "manual";
+    defaultTemp?: number;
+}
+
+const TRV602Z_SCHEDULE_MODES: readonly Trv602zScheduleMode[] = [
+    {code: 0x10, offset: 0xc0, mode: "sleep", defaultTemp: 0},
+    {code: 0x20, offset: 0xc0, mode: "eco", defaultTemp: 150},
+    {code: 0x30, offset: 0xc0, mode: "comfort", defaultTemp: 200},
+    {code: 0x40, offset: 0xa0, mode: "manual", defaultTemp: undefined},
+] as const;
+
 /**
  * Parses a single schedule transition string in HH:MM/<temp or mode> format.
  *
@@ -1620,6 +1634,7 @@ function getActiveScheduleTemperatureTRV602Z(meta: Fz.Meta | Tz.Meta): number | 
 
         if (transitions.length === 0) return null;
 
+        // Offset by +1 minute so the scheduled slot is considered active immediately at the exact start minute (e.g. at 08:30:00).
         const currentMinutes = now.getHours() * 60 + now.getMinutes() + 1;
         let activeTransition = transitions[transitions.length - 1];
         for (let i = transitions.length - 1; i >= 0; i--) {
@@ -2407,16 +2422,15 @@ export const valueConverter = {
             },
         };
     },
+    /**
+     * Value converter for Tuya TRV602Z weekly schedule day datapoints.
+     * Encodes and decodes 1 to 6 daily schedule transitions with configurable modes (sleep, eco, comfort, manual)
+     * and temperatures in 0.1°C steps.
+     */
     // biome-ignore lint/style/useNamingConvention: ignored using `--suppress`
     thermostatScheduleDayMultiDP_TRV602Z: {
         from: (v: number[] | Buffer) => {
-            const modes = [
-                {code: 0x10, offset: 0xc0, mode: "sleep"},
-                {code: 0x20, offset: 0xc0, mode: "eco"},
-                {code: 0x30, offset: 0xc0, mode: "comfort"},
-                {code: 0x40, offset: 0xa0, mode: "manual"},
-            ] as const;
-            const modeByCode = new Map<number, (typeof modes)[number]>(modes.map((m) => [m.code, m]));
+            const modeByCode = new Map<number, (typeof TRV602Z_SCHEDULE_MODES)[number]>(TRV602Z_SCHEDULE_MODES.map((m) => [m.code, m]));
 
             const daySchedule: string[] = [];
             for (let index = 1; index < 24; index += 4) {
@@ -2437,13 +2451,7 @@ export const valueConverter = {
             return Array.from(new Set(daySchedule)).join(" ");
         },
         to: (v: string) => {
-            const modes: Array<{code: number; offset: number; mode: string; temperature?: number}> = [
-                {code: 0x10, offset: 0xc0, mode: "sleep", temperature: 0},
-                {code: 0x20, offset: 0xc0, mode: "eco", temperature: 150},
-                {code: 0x30, offset: 0xc0, mode: "comfort", temperature: 200},
-                {code: 0x40, offset: 0xa0, mode: "manual", temperature: undefined},
-            ];
-            const modeByMode = new Map<string, {code: number; offset: number; mode: string; temperature?: number}>(modes.map((m) => [m.mode, m]));
+            const modeByMode = new Map<string, (typeof TRV602Z_SCHEDULE_MODES)[number]>(TRV602Z_SCHEDULE_MODES.map((m) => [m.mode, m]));
 
             const inputTransitions = v.split(/\s+/).filter(Boolean);
             if (inputTransitions.length < 1 || inputTransitions.length > 6) {
@@ -2469,17 +2477,17 @@ export const valueConverter = {
 
             const payload: number[] = [];
             for (const transition of transitions) {
-                let mode: (typeof modes)[number];
+                let mode: (typeof TRV602Z_SCHEDULE_MODES)[number];
                 let temperature: number;
                 const foundMode = modeByMode.get(transition.setting);
                 if (foundMode) {
                     mode = foundMode;
-                    temperature = foundMode.temperature ?? 0;
+                    temperature = foundMode.defaultTemp ?? 0;
                 } else {
                     const parsedTemp = Number.parseFloat(transition.setting);
                     if (Number.isNaN(parsedTemp)) {
                         throw new Error(
-                            `Invalid schedule setting: "${transition.setting}". Must be a valid number or one of: ${modes.map((m) => m.mode).join(", ")}`,
+                            `Invalid schedule setting: "${transition.setting}". Must be a valid number or one of: ${TRV602Z_SCHEDULE_MODES.map((m) => m.mode).join(", ")}`,
                         );
                     }
                     temperature = Math.floor(parsedTemp * 10);
@@ -2501,6 +2509,12 @@ export const valueConverter = {
             return payload;
         },
     },
+    /**
+     * Value converter for Tuya TRV602Z day schedule with prepended day number (0=Mon..6=Sun).
+     *
+     * @param dayNum - Day index (0 for Monday, 6 for Sunday)
+     * @returns Value converter with prepended day number
+     */
     // biome-ignore lint/style/useNamingConvention: ignored using `--suppress`
     thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber: (dayNum: number) => {
         return {
@@ -5664,6 +5678,9 @@ const tuyaModernExtend = {
                             } else if (value === 0) {
                                 result.current_heating_setpoint =
                                     (result.min_temperature as number | undefined) ?? (meta.state.min_temperature as number | undefined) ?? 5;
+                            } else if (value === 5) {
+                                result.current_heating_setpoint =
+                                    (result.max_temperature as number | undefined) ?? (meta.state.max_temperature as number | undefined) ?? 35;
                             } else if (value === 4) {
                                 const schedTemp = getActiveScheduleTemperatureTRV602Z(meta);
                                 if (schedTemp !== null) result.current_heating_setpoint = schedTemp;
@@ -5844,6 +5861,11 @@ const tuyaModernExtend = {
                     await sendDataPointValue(entity, 118, 0);
                     resultState.boost_duration_set = 0;
                     resultState.boost_till = "off";
+                    if (meta.state.setpoint_after_boost !== undefined) {
+                        await sendDataPointValue(entity, 4, Math.round((meta.state.setpoint_after_boost as number) * 10));
+                        resultState.current_heating_setpoint = meta.state.setpoint_after_boost;
+                        resultState.setpoint_after_boost = null;
+                    }
                 }
                 if (targetPreset !== "away" && currentAwayDurationSet > 0) {
                     await sendDataPointValue(entity, 117, 0);
@@ -5917,6 +5939,7 @@ const tuyaModernExtend = {
                                 }
                                 const boostDuration = (meta.state.boost_duration as number | undefined) ?? 15;
                                 if (currentBoostDurationSet === 0) {
+                                    resultState.setpoint_after_boost = meta.state.current_heating_setpoint;
                                     await sendDataPointValue(entity, 118, boostDuration);
                                 }
                                 resultState.preset = "boost";
@@ -5948,6 +5971,81 @@ const tuyaModernExtend = {
             },
         };
 
+        const createOptionalExposes = (features: {
+            window?: boolean;
+            motorThrust?: boolean;
+            displayBrightness?: boolean;
+            screenOrientation?: string[];
+            regulationMode?: boolean;
+            hysteresis?: boolean;
+            frostProtection?: boolean;
+        }): Expose[] => {
+            const list: Expose[] = [];
+            if (features.window) {
+                list.push(
+                    e
+                        .binary("window_detection", ea.STATE_SET, "ON", "OFF")
+                        .withDescription("(Optional) Enables/disables window detection on the device.")
+                        .withCategory("config"),
+                    e.window_open(),
+                );
+            }
+            if (features.motorThrust) {
+                list.push(
+                    e
+                        .enum("motor_thrust", ea.STATE_SET, ["strong", "middle", "weak"])
+                        .withCategory("config")
+                        .withDescription("(Optional) Might be not supported for some devices."),
+                );
+            }
+            if (features.displayBrightness) {
+                list.push(e.enum("display_brightness", ea.STATE_SET, ["high", "medium", "low"]).withCategory("config"));
+            }
+            if (features.screenOrientation) {
+                list.push(
+                    e
+                        .enum("screen_orientation", ea.STATE_SET, features.screenOrientation)
+                        .withCategory("config")
+                        .withDescription("Screen rotation (*may not be supported by all devices)"),
+                );
+            }
+            if (features.regulationMode) {
+                list.push(
+                    e
+                        .enum("regulation_mode", ea.STATE_SET, ["pid", "hysteresis"])
+                        .withCategory("config")
+                        .withDescription(
+                            ">> PID Mode: The TRV constantly adjusts heating to keep the temperature as close as possible to the target. This improves comfort and reduces temperature swings but uses more energy because it makes continuous adjustments. >> Hysteresis Mode: The TRV turns heating on when the temperature drops below a set point and off when it rises above it, using a buffer (Hysteresis Threshold) to prevent frequent switching. This provides stable and reliable control.",
+                        ),
+                );
+            }
+            if (features.hysteresis) {
+                list.push(
+                    e
+                        .numeric("hysteresis_threshold", ea.STATE_SET)
+                        .withCategory("config")
+                        .withUnit("°C")
+                        .withValueMin(0.5)
+                        .withValueMax(5)
+                        .withValueStep(0.1)
+                        .withDescription(
+                            "Only used in Hysteresis Regulation Mode. The offset from the target temperature in which the temperature has to change for the heating state to change. This is to prevent erratically turning on/off when the temperature is close to the target",
+                        ),
+                );
+            }
+            if (features.frostProtection) {
+                list.push(
+                    e
+                        .binary("frost_protection", ea.STATE_SET, "ON", "OFF")
+                        .withCategory("config")
+                        .withDescription(
+                            "To be used in Off mode. The valve will open when the room temperature is lower than 5 °C and close when it rises to 7 °C. (Optional Feature, added because TRV reported DP122)",
+                        ),
+                );
+            }
+            return list;
+        };
+
         const exposesFunction: DefinitionExposesFunction = (device: Zh.Device | DummyDevice, options: KeyValue): Expose[] => {
             let presets = ["manual", "sleep", "eco", "comfort", "max", "away", "boost", "schedule"];
             let presetsDescription = "Select TRV preset";
@@ -5969,112 +6067,37 @@ const tuyaModernExtend = {
                         presetsDescription =
                             'Select TRV preset (NOTE: Preset "Temporary" cannot be selected. It can be triggered only by TRV when temperature is adjusted manually while TRV is in "Schedule".)';
                     }
-                    if (((trvConfig >> TRV602Z_CONFIG_BIT_WINDOW) & 1) === 1) {
-                        optionalExpose.push(
-                            e
-                                .binary("window_detection", ea.STATE_SET, "ON", "OFF")
-                                .withDescription("(Optional) Enables/disables window detection on the device.")
-                                .withCategory("config"),
-                            e.window_open(),
-                        );
-                    }
                     if (((trvConfig >> TRV602Z_CONFIG_BIT_OLED_SCREEN) & 1) === 1) {
                         screenOrientationOptions = ["up", "down", "left", "right"];
                     }
                 }
 
-                if (device.meta.motor_thrust !== undefined && trvConfig !== undefined && ((trvConfig >> TRV602Z_CONFIG_BIT_MOTOR_THRUST) & 1) === 1) {
-                    optionalExpose.push(
-                        e
-                            .enum("motor_thrust", ea.STATE_SET, ["strong", "middle", "weak"])
-                            .withCategory("config")
-                            .withDescription("(Optional) Might be not supported for some devices."),
-                    );
-                }
-                if (device.meta.display_brightness !== undefined) {
-                    optionalExpose.push(e.enum("display_brightness", ea.STATE_SET, ["high", "medium", "low"]).withCategory("config"));
-                }
-                if (device.meta.screen_orientation !== undefined) {
-                    optionalExpose.push(
-                        e
-                            .enum("screen_orientation", ea.STATE_SET, screenOrientationOptions)
-                            .withCategory("config")
-                            .withDescription("Screen rotation (*may not be supported by all devices)"),
-                    );
-                }
-                if (device.meta.regulation_mode !== undefined) {
-                    optionalExpose.push(
-                        e
-                            .enum("regulation_mode", ea.STATE_SET, ["pid", "hysteresis"])
-                            .withCategory("config")
-                            .withDescription(
-                                ">> PID Mode: The TRV constantly adjusts heating to keep the temperature as close as possible to the target. This improves comfort and reduces temperature swings but uses more energy because it makes continuous adjustments. >> Hysteresis Mode: The TRV turns heating on when the temperature drops below a set point and off when it rises above it, using a buffer (Hysteresis Threshold) to prevent frequent switching. This provides stable and reliable control.",
-                            ),
-                    );
-                }
-                if (device.meta.hysteresis_threshold !== undefined) {
-                    optionalExpose.push(
-                        e
-                            .numeric("hysteresis_threshold", ea.STATE_SET)
-                            .withCategory("config")
-                            .withUnit("°C")
-                            .withValueMin(0.5)
-                            .withValueMax(5)
-                            .withValueStep(0.1)
-                            .withDescription(
-                                "Only used in Hysteresis Regulation Mode. The offset from the target temperature in which the temperature has to change for the heating state to change. This is to prevent erratically turning on/off when the temperature is close to the target",
-                            ),
-                    );
-                }
-                if (device.meta.frost_protection !== undefined) {
-                    optionalExpose.push(
-                        e
-                            .binary("frost_protection", ea.STATE_SET, "ON", "OFF")
-                            .withCategory("config")
-                            .withDescription(
-                                "To be used in Off mode. The valve will open when the room temperature is lower than 5 °C and close when it rises to 7 °C. (Optional Feature, added because TRV reported DP122)",
-                            ),
-                    );
-                }
+                optionalExpose.push(
+                    ...createOptionalExposes({
+                        window: trvConfig !== undefined && ((trvConfig >> TRV602Z_CONFIG_BIT_WINDOW) & 1) === 1,
+                        motorThrust:
+                            device.meta.motor_thrust !== undefined &&
+                            trvConfig !== undefined &&
+                            ((trvConfig >> TRV602Z_CONFIG_BIT_MOTOR_THRUST) & 1) === 1,
+                        displayBrightness: device.meta.display_brightness !== undefined,
+                        screenOrientation: device.meta.screen_orientation !== undefined ? screenOrientationOptions : undefined,
+                        regulationMode: device.meta.regulation_mode !== undefined,
+                        hysteresis: device.meta.hysteresis_threshold !== undefined,
+                        frostProtection: device.meta.frost_protection !== undefined,
+                    }),
+                );
             } else if (!device || utils.isDummyDevice(device)) {
                 presets = ["manual", "sleep", "eco", "comfort", "max", "away", "boost", "schedule", "temporary"];
                 optionalExpose.push(
-                    e
-                        .binary("window_detection", ea.STATE_SET, "ON", "OFF")
-                        .withDescription("(Optional) Enables/disables window detection on the device.")
-                        .withCategory("config"),
-                    e.window_open(),
-                    e
-                        .enum("motor_thrust", ea.STATE_SET, ["strong", "middle", "weak"])
-                        .withCategory("config")
-                        .withDescription("(Optional) Might be not supported for some devices."),
-                    e.enum("display_brightness", ea.STATE_SET, ["high", "medium", "low"]).withCategory("config"),
-                    e
-                        .enum("screen_orientation", ea.STATE_SET, ["up", "down", "left", "right"])
-                        .withCategory("config")
-                        .withDescription("Screen rotation (*may not be supported by all devices)"),
-                    e
-                        .enum("regulation_mode", ea.STATE_SET, ["pid", "hysteresis"])
-                        .withCategory("config")
-                        .withDescription(
-                            ">> PID Mode: The TRV constantly adjusts heating to keep the temperature as close as possible to the target. This improves comfort and reduces temperature swings but uses more energy because it makes continuous adjustments. >> Hysteresis Mode: The TRV turns heating on when the temperature drops below a set point and off when it rises above it, using a buffer (Hysteresis Threshold) to prevent frequent switching. This provides stable and reliable control.",
-                        ),
-                    e
-                        .numeric("hysteresis_threshold", ea.STATE_SET)
-                        .withCategory("config")
-                        .withUnit("°C")
-                        .withValueMin(0.5)
-                        .withValueMax(5)
-                        .withValueStep(0.1)
-                        .withDescription(
-                            "Only used in Hysteresis Regulation Mode. The offset from the target temperature in which the temperature has to change for the heating state to change. This is to prevent erratically turning on/off when the temperature is close to the target",
-                        ),
-                    e
-                        .binary("frost_protection", ea.STATE_SET, "ON", "OFF")
-                        .withCategory("config")
-                        .withDescription(
-                            "To be used in Off mode. The valve will open when the room temperature is lower than 5 °C and close when it rises to 7 °C. (Optional Feature, added because TRV reported DP122)",
-                        ),
+                    ...createOptionalExposes({
+                        window: true,
+                        motorThrust: true,
+                        displayBrightness: true,
+                        screenOrientation: ["up", "down", "left", "right"],
+                        regulationMode: true,
+                        hysteresis: true,
+                        frostProtection: true,
+                    }),
                 );
             }
 

@@ -715,6 +715,65 @@ describe("lib/tuya", () => {
                 system_mode: "auto",
                 preset: "schedule",
             });
+
+            // Mode 5: on/max with fallback
+            expect(climateFz?.convert(definition as Definition, createMsg(5), () => {}, {}, meta)).toStrictEqual({
+                device_mode: "on",
+                system_mode: "heat",
+                preset: "max",
+                current_heating_setpoint: 35,
+            });
+        });
+
+        it("handles boost start and cancellation in tz preserving and restoring setpoint", async () => {
+            const climateTz = definition?.toZigbee?.find((c) => c.key?.includes("preset"));
+            expect(climateTz).toBeDefined();
+
+            const meta = {
+                state: {preset: "schedule", current_heating_setpoint: 20.5, boost_duration_set: 0, boost_duration: 15},
+                device,
+                endpoint_name: null,
+                options: null,
+                message: null,
+                mapped: definition,
+                publish: null,
+            } as Tz.Meta;
+
+            // Start boost via preset
+            const startRes = await climateTz?.convertSet?.(device.endpoints[0], "preset", "boost", meta);
+            expect(startRes).toMatchObject({
+                state: {
+                    preset: "boost",
+                    setpoint_after_boost: 20.5,
+                },
+            });
+
+            // Cancel boost via preset change
+            const metaInBoost = {
+                state: {
+                    preset: "boost",
+                    current_heating_setpoint: 30.0,
+                    boost_duration_set: 15,
+                    setpoint_after_boost: 20.5,
+                },
+                device,
+                endpoint_name: null,
+                options: null,
+                message: null,
+                mapped: definition,
+                publish: null,
+            } as Tz.Meta;
+
+            const cancelRes = await climateTz?.convertSet?.(device.endpoints[0], "preset", "schedule", metaInBoost);
+            expect(cancelRes).toMatchObject({
+                state: {
+                    preset: "schedule",
+                    boost_duration_set: 0,
+                    boost_till: "off",
+                    current_heating_setpoint: 20.5,
+                    setpoint_after_boost: null,
+                },
+            });
         });
 
         it("handles boost start and end via DP 118 returning to schedule preset", () => {
