@@ -1,4 +1,4 @@
-import {describe, expect, it, vi} from "vitest";
+import {beforeEach, describe, expect, it, vi} from "vitest";
 import {Zcl} from "zigbee-herdsman";
 import {findByDevice, type Tz} from "../src/index";
 import * as legacy from "../src/lib/legacy";
@@ -586,6 +586,207 @@ describe("lib/tuya", () => {
                 expect.objectContaining({dpValues: [{dp: 21, datatype: 2, data: Buffer.from([0, 0, 0, 112])}]}),
                 expect.anything(),
             );
+        });
+    });
+
+    describe("thermostatScheduleDayMultiDP_TRV602Z", () => {
+        const converter = tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z;
+        const withDay = tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(1);
+
+        it("encodes and decodes multi-mode schedule correctly", () => {
+            const input = "06:00/comfort 08:30/eco 12:00/21.5 18:00/comfort 22:00/sleep";
+            const encoded = converter.to(input);
+            expect(encoded.length).toBe(24); // 6 transitions * 4 bytes
+
+            // Day byte + 24 payload bytes = 25 bytes
+            const decoded = converter.from([1, ...encoded]);
+            expect(decoded).toBe(input);
+        });
+
+        it("prepends day number in WithDayNumber", () => {
+            const input = "07:00/comfort 23:00/sleep";
+            const encodedWithDay = withDay.to(input);
+            expect(encodedWithDay[0]).toBe(1); // Monday
+            expect(encodedWithDay.length).toBe(25);
+
+            const decoded = withDay.from(encodedWithDay);
+            expect(decoded).toBe(input);
+        });
+
+        it("throws on invalid schedule input", () => {
+            expect(() => converter.to("")).toThrow("Invalid schedule");
+            expect(() => converter.to("25:00/comfort")).toThrow("Invalid hour or minute");
+            expect(() => converter.to("06:00/invalid_mode")).toThrow("Invalid schedule setting");
+            expect(() => converter.to("06:00/4.0")).toThrow("Invalid temperature");
+        });
+    });
+
+    describe("localTemperatureCalibration32", () => {
+        const converter = tuya.valueConverter.localTemperatureCalibration32;
+
+        it("converts positive and zero calibration", () => {
+            expect(converter.to(2.5)).toBe(25);
+            expect(converter.from(25)).toBe(2.5);
+
+            expect(converter.to(0)).toBe(0);
+            expect(converter.from(0)).toBe(0);
+        });
+
+        it("converts negative calibration with 32-bit unsigned wrapping", () => {
+            // -2.0°C -> -20 -> 0xFFFFFFEC (4294967276)
+            expect(converter.to(-2.0)).toBe(4294967276);
+            expect(converter.from(4294967276)).toBe(-2.0);
+
+            // -0.5°C -> -5 -> 0xFFFFFFFB (4294967291)
+            expect(converter.to(-0.5)).toBe(4294967291);
+            expect(converter.from(4294967291)).toBe(-0.5);
+        });
+
+        it("throws on non-finite values", () => {
+            // @ts-expect-error test invalid input
+            expect(() => converter.to("abc")).toThrow("Invalid local_temperature_calibration value");
+            expect(() => converter.to(Number.NaN)).toThrow("Invalid local_temperature_calibration value");
+        });
+    });
+
+    describe("TRV602Z state machine", () => {
+        let device: ReturnType<typeof mockDevice>;
+        let definition: Awaited<ReturnType<typeof findByDevice>>;
+
+        beforeEach(async () => {
+            device = mockDevice({modelID: "TS0601", manufacturerName: "_TZE204_qyr2m29i", endpoints: [{ID: 1}]});
+            definition = await findByDevice(device);
+        });
+
+        it("initializes durations and till times on genBasic", () => {
+            const initConverter = definition?.fromZigbee?.find((c) => c.cluster === "genBasic");
+            expect(initConverter).toBeDefined();
+            const meta = {state: {}, device} as unknown as Fz.Meta;
+            const res = initConverter?.convert(definition as Definition, {} as Fz.Message, () => {}, {}, meta);
+            expect(res).toStrictEqual({
+                boost_duration: 15,
+                away_duration: 7,
+                boost_till: "off",
+                away_till: "off",
+            });
+        });
+
+        it("maps device_mode reports from DP 2", () => {
+            const climateFz = definition?.fromZigbee?.find((c) => c.cluster === "manuSpecificTuya");
+            expect(climateFz).toBeDefined();
+
+            const createMsg = (mode: number) =>
+                ({
+                    data: {
+                        dpValues: [{dp: 2, datatype: 4, data: Buffer.from([mode])}],
+                    },
+                }) as unknown as Fz.Message;
+
+            const meta = {state: {comfort_temperature: 20}, device} as unknown as Fz.Meta;
+
+            // Mode 0: off
+            expect(climateFz?.convert(definition as Definition, createMsg(0), () => {}, {}, meta)).toStrictEqual({
+                device_mode: "off",
+                system_mode: "off",
+            });
+
+            // Mode 3: comfort
+            expect(climateFz?.convert(definition as Definition, createMsg(3), () => {}, {}, meta)).toStrictEqual({
+                device_mode: "comfort",
+                system_mode: "heat",
+                preset: "comfort",
+                current_heating_setpoint: 20,
+            });
+
+            // Mode 4: auto/schedule
+            expect(climateFz?.convert(definition as Definition, createMsg(4), () => {}, {}, meta)).toStrictEqual({
+                device_mode: "auto",
+                system_mode: "auto",
+                preset: "schedule",
+            });
+        });
+
+        it("handles boost start and end via DP 118", () => {
+            const climateFz = definition?.fromZigbee?.find((c) => c.cluster === "manuSpecificTuya");
+            const createMsg = (mins: number) =>
+                ({
+                    data: {
+                        dpValues: [{dp: 118, datatype: 2, data: Buffer.from([0, 0, 0, mins])}],
+                    },
+                }) as unknown as Fz.Message;
+
+            const meta = {state: {preset: "schedule"}, device} as unknown as Fz.Meta;
+
+            // Start boost 15 min
+            const startRes = climateFz?.convert(definition as Definition, createMsg(15), () => {}, {}, meta);
+            expect(startRes).toMatchObject({
+                preset: "boost",
+                boost_duration_set: 15,
+                boost_till: expect.any(String),
+            });
+
+            // End boost
+            const metaInBoost = {state: {preset: "boost"}, device} as unknown as Fz.Meta;
+            const endRes = climateFz?.convert(definition as Definition, createMsg(0), () => {}, {}, metaInBoost);
+            expect(endRes).toMatchObject({
+                preset: "schedule",
+                boost_duration_set: 0,
+                boost_till: "off",
+            });
+        });
+
+        it("validates boost and away durations in tz", async () => {
+            const durationTz = definition?.toZigbee?.find((c) => c.key?.includes("boost_duration"));
+            expect(durationTz).toBeDefined();
+
+            const meta = {state: {}, device, endpoint_name: null, options: null, message: null, mapped: definition, publish: null} as Tz.Meta;
+            const resBoost = await durationTz?.convertSet?.(device.endpoints[0], "boost_duration", 30, meta);
+            expect(resBoost).toStrictEqual({state: {boost_duration: 30}});
+
+            const resAway = await durationTz?.convertSet?.(device.endpoints[0], "away_duration", 14, meta);
+            expect(resAway).toStrictEqual({state: {away_duration: 14}});
+
+            expect(() => durationTz?.convertSet?.(device.endpoints[0], "boost_duration", 200, meta)).toThrow(
+                "boost_duration must be between 1 and 120",
+            );
+        });
+
+        it("generates dynamic exposes based on device metadata", () => {
+            const exposesFn = definition?.exposes as (device: Zh.Device | undefined, options: unknown) => Expose[];
+            expect(typeof exposesFn).toBe("function");
+
+            // Documentation generation mode (!device)
+            const docExposes = exposesFn(undefined, {});
+            const docNames = docExposes.map((e) => e.name);
+            expect(docNames).toContain("window_detection");
+            expect(docNames).toContain("window_open");
+            expect(docNames).toContain("regulation_mode");
+            expect(docNames).toContain("motor_thrust");
+            expect(docNames).toContain("hysteresis_threshold");
+
+            // Minimal device without features
+            const minimalDevice = {meta: {}} as unknown as Zh.Device;
+            const minExposes = exposesFn(minimalDevice, {});
+            const minNames = minExposes.map((e) => e.name);
+            expect(minNames).not.toContain("window_detection");
+            expect(minNames).not.toContain("regulation_mode");
+            expect(minNames).not.toContain("motor_thrust");
+
+            // Device with window detection bit (bit 1) and regulation_mode
+            const configuredDevice = {
+                meta: {
+                    trv_config: 2, // bit 1 set
+                    regulation_mode: 0,
+                    min_temperature: 7,
+                    max_temperature: 30,
+                },
+            } as unknown as Zh.Device;
+            const configExposes = exposesFn(configuredDevice, {});
+            const configNames = configExposes.map((e) => e.name);
+            expect(configNames).toContain("window_detection");
+            expect(configNames).toContain("window_open");
+            expect(configNames).toContain("regulation_mode");
+            expect(configNames).not.toContain("motor_thrust");
         });
     });
 });
