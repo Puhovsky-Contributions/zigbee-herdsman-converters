@@ -6110,10 +6110,11 @@ const tuyaModernExtend = {
 
             const defaultExpose: Expose[] = [
                 e.battery(),
-                e
-                    .enum("fault", ea.STATE, ["clear", "fault_sensor", "fault_motor", "fault_low_batt", "fault_ug_low_batt", "fault_poor_bat"])
-                    .withCategory("diagnostic")
-                    .withDescription("Fault status of the device (clear = nothing)"),
+                e.binary("fault_sensor", ea.STATE, true, false).withCategory("diagnostic").withDescription("Temperature sensor fault"),
+                e.binary("fault_motor", ea.STATE, true, false).withCategory("diagnostic").withDescription("Motor fault"),
+                e.binary("fault_low_battery", ea.STATE, true, false).withCategory("diagnostic").withDescription("Low battery"),
+                e.binary("fault_very_low_battery", ea.STATE, true, false).withCategory("diagnostic").withDescription("Very low battery"),
+                e.binary("fault_poor_battery", ea.STATE, true, false).withCategory("diagnostic").withDescription("Poor battery"),
                 e.child_lock(),
                 e.position().withDescription("Current valve opening %").withCategory("diagnostic"),
                 e

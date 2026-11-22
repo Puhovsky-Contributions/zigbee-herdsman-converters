@@ -11976,15 +11976,16 @@ export const definitions: DefinitionWithExtend[] = [
                 [15, "window_open", tuya.valueConverter.trueFalseEnum1],
                 [
                     35,
-                    "fault",
-                    tuya.valueConverterBasic.lookup({
-                        clear: 0,
-                        fault_sensor: 1,
-                        fault_motor: 2,
-                        fault_low_batt: 4,
-                        fault_ug_low_batt: 8,
-                        fault_poor_bat: 16,
-                    }),
+                    null,
+                    {
+                        from: (value: number) => ({
+                            fault_sensor: Boolean(value & 1),
+                            fault_motor: Boolean(value & 2),
+                            fault_low_battery: Boolean(value & 4),
+                            fault_very_low_battery: Boolean(value & 8),
+                            fault_poor_battery: Boolean(value & 16),
+                        }),
+                    },
                 ],
                 [47, "local_temperature_calibration", tuya.valueConverter.localTemperatureCalibration32],
                 [102, "schedule_monday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(1)],
