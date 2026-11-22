@@ -5550,7 +5550,8 @@ const tuyaModernExtend = {
      *
      * @returns ModernExtend definition for TRV602Z
      */
-    tuyaTrv602z: (): ModernExtend => {
+    tuyaTrv602z: (args?: {frostPreset?: string; frostLabel?: string}): ModernExtend => {
+        const {frostPreset = "sleep", frostLabel = "Sleep temperature"} = args ?? {};
         const TRV602Z_CONFIG_BIT_TEMPORARY = 0;
         const TRV602Z_CONFIG_BIT_WINDOW = 1;
         const TRV602Z_CONFIG_BIT_OLED_SCREEN = 4;
@@ -5647,7 +5648,7 @@ const tuyaModernExtend = {
                     if (dp === 2) {
                         const modeMap: Record<number, {mode: string; systemMode: string; preset: string; tempKey?: string}> = {
                             0: {mode: "off", systemMode: "off", preset: "none", tempKey: "min_temperature"},
-                            1: {mode: "sleep", systemMode: "heat", preset: "sleep", tempKey: "sleep_temperature"},
+                            1: {mode: "sleep", systemMode: "heat", preset: frostPreset, tempKey: "sleep_temperature"},
                             2: {mode: "eco", systemMode: "heat", preset: "eco", tempKey: "eco_temperature"},
                             3: {mode: "comfort", systemMode: "heat", preset: "comfort", tempKey: "comfort_temperature"},
                             4: {mode: "auto", systemMode: "auto", preset: "schedule"},
@@ -5692,8 +5693,8 @@ const tuyaModernExtend = {
                             (meta.state.trv_config as number | undefined) ??
                             (meta.device.meta.trv_config as number | undefined);
 
-                        if (preset === "sleep" || preset === "eco" || preset === "comfort") {
-                            const target = preset === "sleep" ? sleepTemp : preset === "eco" ? ecoTemp : comfortTemp;
+                        if (preset === frostPreset || preset === "eco" || preset === "comfort") {
+                            const target = preset === frostPreset ? sleepTemp : preset === "eco" ? ecoTemp : comfortTemp;
                             if (target !== undefined && Math.abs(setpoint - target) >= 0.1) {
                                 result.preset = "manual";
                             }
@@ -5703,7 +5704,7 @@ const tuyaModernExtend = {
                             } else if (ecoTemp !== undefined && Math.abs(setpoint - ecoTemp) < 0.1) {
                                 result.preset = "eco";
                             } else if (sleepTemp !== undefined && Math.abs(setpoint - sleepTemp) < 0.1) {
-                                result.preset = "sleep";
+                                result.preset = frostPreset;
                             }
                         } else if (preset === "schedule" || preset === "temporary") {
                             const scheduledTemp = getActiveScheduleTemperatureTRV602Z(meta);
@@ -5756,7 +5757,7 @@ const tuyaModernExtend = {
                         const dpMap: Record<number, {key: string; preset: string}> = {
                             119: {key: "comfort_temperature", preset: "comfort"},
                             120: {key: "eco_temperature", preset: "eco"},
-                            121: {key: "sleep_temperature", preset: "sleep"},
+                            121: {key: "sleep_temperature", preset: frostPreset},
                         };
                         const entry = dpMap[dp];
                         result[entry.key] = temp;
@@ -5909,10 +5910,10 @@ const tuyaModernExtend = {
                                 resultState.device_mode = "eco";
                                 resultState.preset = "eco";
                                 break;
-                            case "sleep":
+                            case frostPreset:
                                 await sendDataPointEnum(entity, 2, 1);
                                 resultState.device_mode = "sleep";
-                                resultState.preset = "sleep";
+                                resultState.preset = frostPreset;
                                 break;
                             case "max":
                                 await sendDataPointEnum(entity, 2, 5);
@@ -6054,7 +6055,7 @@ const tuyaModernExtend = {
         };
 
         const exposesFunction: DefinitionExposesFunction = (device: Zh.Device | DummyDevice, options: KeyValue): Expose[] => {
-            let presets = ["manual", "sleep", "eco", "comfort", "max", "away", "boost", "schedule"];
+            let presets = ["manual", frostPreset, "eco", "comfort", "max", "away", "boost", "schedule"];
             let presetsDescription = "Select TRV preset";
             let screenOrientationOptions = ["up", "down"];
             const optionalExpose: Expose[] = [];
@@ -6070,7 +6071,7 @@ const tuyaModernExtend = {
                 const trvConfig = device.meta.trv_config as number | undefined;
                 if (trvConfig !== undefined) {
                     if (((trvConfig >> TRV602Z_CONFIG_BIT_TEMPORARY) & 1) === 1) {
-                        presets = ["manual", "sleep", "eco", "comfort", "max", "away", "boost", "schedule", "temporary"];
+                        presets = ["manual", frostPreset, "eco", "comfort", "max", "away", "boost", "schedule", "temporary"];
                         presetsDescription =
                             'Select TRV preset (NOTE: Preset "Temporary" cannot be selected. It can be triggered only by TRV when temperature is adjusted manually while TRV is in "Schedule".)';
                     }
@@ -6094,7 +6095,7 @@ const tuyaModernExtend = {
                     }),
                 );
             } else if (!device || utils.isDummyDevice(device)) {
-                presets = ["manual", "sleep", "eco", "comfort", "max", "away", "boost", "schedule", "temporary"];
+                presets = ["manual", frostPreset, "eco", "comfort", "max", "away", "boost", "schedule", "temporary"];
                 optionalExpose.push(
                     ...createOptionalExposes({
                         window: true,
@@ -6110,10 +6111,11 @@ const tuyaModernExtend = {
 
             const defaultExpose: Expose[] = [
                 e.battery(),
-                e
-                    .enum("fault", ea.STATE, ["clear", "fault_sensor", "fault_motor", "fault_low_batt", "fault_ug_low_batt", "fault_poor_bat"])
-                    .withCategory("diagnostic")
-                    .withDescription("Fault status of the device (clear = nothing)"),
+                e.binary("fault_sensor", ea.STATE, true, false).withCategory("diagnostic").withDescription("Temperature sensor fault"),
+                e.binary("fault_motor", ea.STATE, true, false).withCategory("diagnostic").withDescription("Motor fault"),
+                e.binary("fault_low_battery", ea.STATE, true, false).withCategory("diagnostic").withDescription("Low battery"),
+                e.binary("fault_very_low_battery", ea.STATE, true, false).withCategory("diagnostic").withDescription("Very low battery"),
+                e.binary("fault_poor_battery", ea.STATE, true, false).withCategory("diagnostic").withDescription("Poor battery"),
                 e.child_lock(),
                 e.position().withDescription("Current valve opening %").withCategory("diagnostic"),
                 e
@@ -6164,6 +6166,7 @@ const tuyaModernExtend = {
                     .withDescription("Temperature used for Eco preset"),
                 e
                     .numeric("sleep_temperature", ea.STATE_SET)
+                    .withLabel(frostLabel)
                     .withCategory("config")
                     .withUnit("°C")
                     .withValueMin(5)

@@ -2270,22 +2270,6 @@ const ms032zLedChips = {
     type_15: tuya.enum(15),
 };
 
-const ts0601Wsek35umModeSetpointConverter = {
-    cluster: "manuSpecificTuya",
-    type: ["commandDataReport"],
-    convert: (model, msg) => {
-        const mode = msg.data.dpValues?.find((dp) => dp.dp === 2);
-
-        if (mode?.data?.[0] === 0) {
-            return {current_heating_setpoint: 5};
-        }
-    },
-} satisfies Fz.Converter<"manuSpecificTuya", undefined, ["commandDataReport"]>;
-
-const ts0601Wsek35umChildrenLockConverter = {
-    from: (value: boolean) => value === true,
-};
-
 // for https://www.zigbee2mqtt.io/devices/TO-Q-SYS-JZT.html
 const Tze2846ocnqlhnlcdBrightnessConverter = {
     from: (value: number) => value * 20,
@@ -2317,6 +2301,90 @@ const sp107eLedChips = {
     TM1814: tuya.enum(8),
     SK6812: tuya.enum(9),
 };
+
+const trv602zDatapoints: Tuya.MetaTuyaDataPoints = [
+    [3, "running_state", tuya.valueConverterBasic.lookup({heat: 1, idle: 0})],
+    [5, "local_temperature", tuya.valueConverter.divideBy10],
+    [6, "battery", tuya.valueConverter.raw],
+    [
+        7,
+        "child_lock",
+        tuya.valueConverterBasic.lookup({
+            LOCK: true,
+            UNLOCK: false,
+        }),
+    ],
+    [9, "max_temperature", tuya.valueConverter.divideBy10],
+    [10, "min_temperature", tuya.valueConverter.divideBy10],
+    [14, "window_detection", tuya.valueConverter.onOff],
+    [15, "window_open", tuya.valueConverter.trueFalseEnum1],
+    [
+        35,
+        null,
+        {
+            from: (value: number) => ({
+                fault_sensor: Boolean(value & 1),
+                fault_motor: Boolean(value & 2),
+                fault_low_battery: Boolean(value & 4),
+                fault_very_low_battery: Boolean(value & 8),
+                fault_poor_battery: Boolean(value & 16),
+            }),
+        },
+    ],
+    [47, "local_temperature_calibration", tuya.valueConverter.localTemperatureCalibration32],
+    [102, "schedule_monday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(1)],
+    [103, "schedule_tuesday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(2)],
+    [104, "schedule_wednesday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(3)],
+    [105, "schedule_thursday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(4)],
+    [106, "schedule_friday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(5)],
+    [107, "schedule_saturday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(6)],
+    [108, "schedule_sunday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(7)],
+    [
+        110,
+        "motor_thrust",
+        tuya.valueConverterBasic.lookup({
+            strong: tuya.enum(0),
+            middle: tuya.enum(1),
+            weak: tuya.enum(2),
+        }),
+    ],
+    [
+        111,
+        "display_brightness",
+        tuya.valueConverterBasic.lookup({
+            high: tuya.enum(0),
+            medium: tuya.enum(1),
+            low: tuya.enum(2),
+        }),
+    ],
+    [
+        113,
+        "screen_orientation",
+        tuya.valueConverterBasic.lookup({
+            up: tuya.enum(0),
+            down: tuya.enum(1),
+            left: tuya.enum(2),
+            right: tuya.enum(3),
+        }),
+    ],
+    [114, "position", tuya.valueConverter.divideBy10],
+    [115, "hysteresis_threshold", tuya.valueConverter.divideBy10],
+    [117, "away_duration_set", tuya.valueConverter.raw],
+    [118, "boost_duration_set", tuya.valueConverter.raw],
+    [119, "comfort_temperature", tuya.valueConverter.divideBy10],
+    [120, "eco_temperature", tuya.valueConverter.divideBy10],
+    [121, "sleep_temperature", tuya.valueConverter.divideBy10],
+    [122, "frost_protection", tuya.valueConverter.onOff],
+    [125, "trv_config", tuya.valueConverter.raw],
+    [
+        127,
+        "regulation_mode",
+        tuya.valueConverterBasic.lookup({
+            pid: tuya.enum(0),
+            hysteresis: tuya.enum(1),
+        }),
+    ],
+];
 
 export const definitions: DefinitionWithExtend[] = [
     {
@@ -11957,90 +12025,24 @@ export const definitions: DefinitionWithExtend[] = [
                 queryOnDeviceAnnounce: true,
             }),
         ],
-        meta: {
-            tuyaDatapoints: [
-                [3, "running_state", tuya.valueConverterBasic.lookup({heat: 1, idle: 0})],
-                [5, "local_temperature", tuya.valueConverter.divideBy10],
-                [6, "battery", tuya.valueConverter.raw],
-                [
-                    7,
-                    "child_lock",
-                    tuya.valueConverterBasic.lookup({
-                        LOCK: true,
-                        UNLOCK: false,
-                    }),
-                ],
-                [9, "max_temperature", tuya.valueConverter.divideBy10],
-                [10, "min_temperature", tuya.valueConverter.divideBy10],
-                [14, "window_detection", tuya.valueConverter.onOff],
-                [15, "window_open", tuya.valueConverter.trueFalseEnum1],
-                [
-                    35,
-                    "fault",
-                    tuya.valueConverterBasic.lookup({
-                        clear: 0,
-                        fault_sensor: 1,
-                        fault_motor: 2,
-                        fault_low_batt: 4,
-                        fault_ug_low_batt: 8,
-                        fault_poor_bat: 16,
-                    }),
-                ],
-                [47, "local_temperature_calibration", tuya.valueConverter.localTemperatureCalibration32],
-                [102, "schedule_monday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(1)],
-                [103, "schedule_tuesday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(2)],
-                [104, "schedule_wednesday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(3)],
-                [105, "schedule_thursday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(4)],
-                [106, "schedule_friday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(5)],
-                [107, "schedule_saturday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(6)],
-                [108, "schedule_sunday", tuya.valueConverter.thermostatScheduleDayMultiDP_TRV602Z_WithDayNumber(7)],
-                [
-                    110,
-                    "motor_thrust",
-                    tuya.valueConverterBasic.lookup({
-                        strong: tuya.enum(0),
-                        middle: tuya.enum(1),
-                        weak: tuya.enum(2),
-                    }),
-                ],
-                [
-                    111,
-                    "display_brightness",
-                    tuya.valueConverterBasic.lookup({
-                        high: tuya.enum(0),
-                        medium: tuya.enum(1),
-                        low: tuya.enum(2),
-                    }),
-                ],
-                [
-                    113,
-                    "screen_orientation",
-                    tuya.valueConverterBasic.lookup({
-                        up: tuya.enum(0),
-                        down: tuya.enum(1),
-                        left: tuya.enum(2),
-                        right: tuya.enum(3),
-                    }),
-                ],
-                [114, "position", tuya.valueConverter.divideBy10],
-                [115, "hysteresis_threshold", tuya.valueConverter.divideBy10],
-                [117, "away_duration_set", tuya.valueConverter.raw],
-                [118, "boost_duration_set", tuya.valueConverter.raw],
-                [119, "comfort_temperature", tuya.valueConverter.divideBy10],
-                [120, "eco_temperature", tuya.valueConverter.divideBy10],
-                [121, "sleep_temperature", tuya.valueConverter.divideBy10],
-                [122, "frost_protection", tuya.valueConverter.onOff],
-                [125, "trv_config", tuya.valueConverter.raw],
-                [
-                    127,
-                    "regulation_mode",
-                    tuya.valueConverterBasic.lookup({
-                        pid: tuya.enum(0),
-                        hysteresis: tuya.enum(1),
-                    }),
-                ],
-            ],
-        },
+        meta: {tuyaDatapoints: trv602zDatapoints},
+    },
+    {
+        fingerprint: tuya.fingerprint("TS0601", ["_TZE204_wsek35um"]),
+        model: "TS0601_wsek35um",
+        vendor: "Tuya",
+        description: "Radiator thermostat",
+        extend: [
+            tuya.modernExtend.tuyaTrv602z({frostPreset: "frost_protection", frostLabel: "Frost protection temperature"}),
+            tuya.modernExtend.tuyaBase({
+                dp: true,
+                timeStart: "1970",
+                forceTimeUpdates: true,
+                queryOnConfigure: true,
+                queryOnDeviceAnnounce: true,
+            }),
+        ],
+        meta: {tuyaDatapoints: trv602zDatapoints},
     },
     {
         fingerprint: tuya.fingerprint("TS0601", ["_TZE204_xalsoe3m"]),
@@ -30268,37 +30270,6 @@ export const definitions: DefinitionWithExtend[] = [
         },
     },
 
-    {
-        fingerprint: tuya.fingerprint("TS0601", ["_TZE204_wsek35um"]),
-        model: "TS0601_wsek35um",
-        vendor: "Tuya",
-        description: "Radiator thermostat",
-        extend: [tuya.modernExtend.tuyaBase({dp: true, timeStart: "1970"})],
-        fromZigbee: [ts0601Wsek35umModeSetpointConverter],
-        exposes: [
-            e.climate().withLocalTemperature(ea.STATE).withSetpoint("current_heating_setpoint", 5, 30, 0.5, ea.STATE_SET),
-            e.binary("children_lock", ea.STATE, true, false).withDescription("Children lock status"),
-            e.enum("mode", ea.STATE, ["Off", "Cold", "Night", "Day", "Scheduled"]).withDescription("Current mode"),
-        ],
-        meta: {
-            tuyaDatapoints: [
-                [
-                    2,
-                    "mode",
-                    tuya.valueConverterBasic.lookup({
-                        Off: 0,
-                        Cold: 1,
-                        Night: 2,
-                        Day: 3,
-                        Scheduled: 4,
-                    }),
-                ],
-                [4, "current_heating_setpoint", tuya.valueConverter.divideBy10],
-                [5, "local_temperature", tuya.valueConverter.divideBy10],
-                [7, "children_lock", ts0601Wsek35umChildrenLockConverter],
-            ],
-        },
-    },
     {
         fingerprint: tuya.fingerprint("TS0601", ["_TZE204_r6kfl9ta"]),
         model: "ZY-N1",
